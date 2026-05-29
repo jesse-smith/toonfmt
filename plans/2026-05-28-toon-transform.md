@@ -1,7 +1,18 @@
 # TOON Transform — convert `tools/call` result text blocks to TOON
 
 **Date:** 2026-05-28
-**Status:** in progress  <!-- drafted | in progress | landed -->
+**Status:** landed (2026-05-29)  <!-- drafted | in progress | landed -->
+
+<!-- Live-verified 2026-05-29 against Claude Code via a `toon-probe` server
+(toonfmt wrapping the stub) alongside the bare `routing-probe` control:
+- probe_content_only → model received TOON (convert + client renders TOON);
+- probe_equal_pair → model received TOON, no JSON (equality strip fired e2e),
+  vs. bare control which returned raw JSON (toonfmt demonstrably changed bytes);
+- probe_both → model received the untouched STRUCTURED_CHANNEL JSON, NOT the
+  TOON'd content — structuredContent shadows content (as measured), and the
+  keep-gate correctly declined to strip non-equal data (loss-free, fail-safe).
+Both gate branches confirmed on the real client. -->
+
 
 ## Goal
 Make `toonfmt` actually earn its name: on the upstream→client flow, when a response
