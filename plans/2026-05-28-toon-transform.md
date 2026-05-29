@@ -1,7 +1,7 @@
 # TOON Transform — convert `tools/call` result text blocks to TOON
 
 **Date:** 2026-05-28
-**Status:** drafted  <!-- drafted | in progress | landed -->
+**Status:** in progress  <!-- drafted | in progress | landed -->
 
 ## Goal
 Make `toonfmt` actually earn its name: on the upstream→client flow, when a response
@@ -110,9 +110,9 @@ invokes the transform only for `tools/call`-correlated responses.
 
 ## Tasks
 <!-- TDD order: test before impl for each unit. -->
-- [ ] Add deps: `cargo add toon-format json5`; `cargo add serde_json --features preserve_order`. Confirm `cargo build` still clean.
-- [ ] `src/jsonrpc.rs`: extract `classify(&Value) -> Message`; rewrite `parse_line(&str)` as a thin `from_str + classify` wrapper. Existing 9 tests must stay green unchanged; add one direct `classify` test.
-- [ ] `src/transform.rs`: write failing unit tests first, then `tools_call_result(value: serde_json::Value) -> Option<String>`. Tests:
+- [x] Add deps: `cargo add toon-format json5`; `cargo add serde_json --features preserve_order`. Confirm `cargo build` still clean. (Note: `toon-format` default feature is `cli` — pulls ratatui/image/syntect/tiktoken/arboard; disabled via `default-features = false`. `encode_default(&Value) -> Result<String>` is reachable without it. Dep tree ~10 crates, not 180.)
+- [x] `src/jsonrpc.rs`: extract `classify(&Value) -> Message`; rewrite `parse_line(&str)` as a thin `from_str + classify` wrapper. Existing 9 tests must stay green unchanged; add one direct `classify` test.
+- [x] `src/transform.rs`: write failing unit tests first, then `tools_call_result(value: serde_json::Value) -> Option<String>`. Tests:
   (a) single text block of strict JSON → block text becomes TOON, envelope still valid, same `id`/`result` shape;
   (b) text block of JSON5 (trailing comma) → becomes TOON;
   (c) text block of prose (non-JSON) → returns `None` (unchanged);
@@ -124,11 +124,11 @@ invokes the transform only for `tools/call`-correlated responses.
   (g3) **keep — not equal:** `structuredContent` differs from every transformed block (e.g. extra field, or array elements reordered → `Value ==` is array-order-sensitive) → text converts, `structuredContent` **left intact**, debug-logged;
   (g4) **keep — no transformed block:** `structuredContent` present but `content[]` has no convertible text block (prose only / empty) → nothing transformed → `structuredContent` **left intact** (no-op gate);
   (h) error response (`error`, no `result`) → `None`.
-- [ ] `src/proxy.rs`: change `pump`'s callback to `FnMut(&str) -> Option<String>`; on `Some`, write replacement + conditional `\n`; on `None`, write original bytes. Update the existing 3 pump unit tests; add: (i) a callback returning `Some` rewrites exactly that line and re-appends the newline; (ii) a `None`-returning callback is byte-identical (Phase 1 regression guard).
-- [ ] `src/proxy.rs`: wire the downstream closure — `from_str::<Value>` once (fail → `None`), `classify(&v)`; if `Response` and `take_method` resolves to `"tools/call"`, pass the owned `Value` to `transform::tools_call_result` and return its result; else `None`. Upstream closure always returns `None`. Keep trace/debug logging.
+- [x] `src/proxy.rs`: change `pump`'s callback to `FnMut(&str) -> Option<String>`; on `Some`, write replacement + conditional `\n`; on `None`, write original bytes. Update the existing 3 pump unit tests; add: (i) a callback returning `Some` rewrites exactly that line and re-appends the newline; (ii) a `None`-returning callback is byte-identical (Phase 1 regression guard).
+- [x] `src/proxy.rs`: wire the downstream closure — `from_str::<Value>` once (fail → `None`), `classify(&v)`; if `Response` and `take_method` resolves to `"tools/call"`, pass the owned `Value` to `transform::tools_call_result` and return its result; else `None`. Upstream closure always returns `None`. Keep trace/debug logging.
 - [x] `tests/fixtures/json_mcp_stub.py`: zero-dep stdlib MCP stub — **already built** (routing-probe). Advertises `probe_content_only` (content-only JSON object string → plain convert case), `probe_both` (content JSON string + a *structurally equal* `structuredContent` object → equality-strip case), `probe_structured_only`, `probe_structured_string`. Content blocks are JSON-object strings, so they exercise the transform; `probe_both`'s content payload equals its structuredContent, exercising the strip gate. NOTE: `probe_both`'s `CONTENT_PAYLOAD` and `STRUCTURED_PAYLOAD` currently carry *different* sentinels (built to distinguish channels) — for the equality-strip e2e, either add a tool whose two channels are equal, or assert against `probe_content_only` for convert + a dedicated equal-pair tool for strip. Reconcile in the e2e task.
-- [ ] `tests/transform_e2e.rs`: spawn `toonfmt -- python3 tests/fixtures/json_mcp_stub.py`; drive the handshake, then: (1) call `probe_content_only` → assert the returned `content[0].text` is TOON (not the original JSON), no `structuredContent` appears; (2) call an **equal-pair** tool (add one to the stub: content text block == structuredContent object) → assert `content[0].text` is TOON **and** `structuredContent` is **absent** in toonfmt's output (strip fired end-to-end); (3) control — a `tools/list` response passes through unchanged. Skip with a clear message if `python3` is unavailable.
-- [ ] Run cairn-verify; tick boxes only on a clean pass (zero warnings, clippy clean).
+- [x] `tests/transform_e2e.rs`: spawn `toonfmt -- python3 tests/fixtures/json_mcp_stub.py`; drive the handshake, then: (1) call `probe_content_only` → assert the returned `content[0].text` is TOON (not the original JSON), no `structuredContent` appears; (2) call an **equal-pair** tool (added `probe_equal_pair` to the stub: content text block == structuredContent object) → assert `content[0].text` is TOON **and** `structuredContent` is **absent** in toonfmt's output (strip fired end-to-end); (3) control — a `tools/list` response passes through unchanged. Skip with a clear message if `python3` is unavailable.
+- [x] Run cairn-verify; tick boxes only on a clean pass (zero warnings, clippy clean).
 
 ## Acceptance criteria
 <!-- What cairn-accept checks before "landed". -->

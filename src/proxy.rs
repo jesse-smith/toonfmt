@@ -8,22 +8,29 @@
 use std::process::{ExitStatus, Stdio};
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::cli::UpstreamCmd;
-use crate::jsonrpc::{Message, RequestTracker, parse_line};
+use crate::jsonrpc::{Message, RequestTracker, classify, parse_line};
+use crate::transform;
 
 /// Copy newline-framed messages from `reader` to `writer`, invoking `on_line`
-/// with a UTF-8-lossy view of each line for classification. The raw bytes
-/// (including the trailing `\n`, or none at EOF) are forwarded unchanged.
+/// with a UTF-8-lossy view of each line. `on_line` decides per line:
+///
+/// - `None` → forward the **original raw bytes** unchanged (including the trailing
+///   `\n`, or none at EOF, and any non-UTF8 content). This is the exact-fidelity
+///   passthrough path; the client→upstream direction always takes it.
+/// - `Some(replacement)` → write `replacement` instead, re-appending `\n` iff the
+///   original line ended in one. Only the transform path allocates.
 ///
 /// Generic over the IO types so the pump is testable over in-memory pipes.
 pub async fn pump<R, W, F>(reader: R, mut writer: W, mut on_line: F) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
-    F: FnMut(&str),
+    F: FnMut(&str) -> Option<String>,
 {
     let mut buf_reader = BufReader::new(reader);
     let mut line = Vec::new();
@@ -36,9 +43,23 @@ where
         if n == 0 {
             break; // EOF
         }
-        // Classify on a lossy view; forward the original bytes regardless.
-        on_line(&String::from_utf8_lossy(&line));
-        writer.write_all(&line).await.context("writing line through")?;
+        // Classify/transform on a lossy view. On Some, write the replacement and
+        // re-append the framing newline iff the original line had one; on None,
+        // forward the original bytes byte-for-byte.
+        match on_line(&String::from_utf8_lossy(&line)) {
+            Some(replacement) => {
+                writer
+                    .write_all(replacement.as_bytes())
+                    .await
+                    .context("writing transformed line")?;
+                if line.last() == Some(&b'\n') {
+                    writer.write_all(b"\n").await.context("writing line framing")?;
+                }
+            }
+            None => {
+                writer.write_all(&line).await.context("writing line through")?;
+            }
+        }
         writer.flush().await.context("flushing line")?;
     }
     writer.shutdown().await.ok();
@@ -70,6 +91,7 @@ pub async fn run(cmd: UpstreamCmd) -> Result<ExitStatus> {
             if let Message::Request { id, method } = parse_line(line) {
                 up_tracker.record_request(id, method);
             }
+            None // requests are never transformed — byte-identical passthrough
         })
         .await
     });
@@ -79,11 +101,24 @@ pub async fn run(cmd: UpstreamCmd) -> Result<ExitStatus> {
     let down = tokio::spawn(async move {
         let stdout = tokio::io::stdout();
         pump(child_stdout, stdout, move |line| {
-            if let Message::Response { id } = parse_line(line)
-                && let Some(method) = down_tracker.take_method(&id)
-            {
+            // One parse per downstream line — tool results are the largest blobs
+            // we handle. Non-JSON (or non-object) → None → forward raw bytes.
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                return None;
+            };
+            let Message::Response { id } = classify(&value) else {
+                return None;
+            };
+            let Some(method) = down_tracker.take_method(&id) else {
+                return None; // uncorrelated response — pass through
+            };
+            if method != "tools/call" {
                 tracing::trace!(%method, "response correlated (passthrough)");
+                return None;
             }
+            // The owned, already-parsed envelope goes straight to the transform —
+            // no second parse. Some(replacement) rewrites the line; None forwards it.
+            transform::tools_call_result(value)
         })
         .await
     });
@@ -122,14 +157,15 @@ mod tests {
     use super::*;
 
     /// bytes in == bytes out, across a JSON line, a non-JSON line, and a final
-    /// line with no trailing newline.
+    /// line with no trailing newline. A `None`-returning callback is the Phase 1
+    /// fidelity path.
     #[tokio::test]
     async fn pump_forwards_bytes_unchanged() {
         let input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\nthis is not json\n{\"no\":\"newline\"}";
         let reader = &input[..];
         let mut output = Vec::new();
 
-        pump(reader, &mut output, |_| {}).await.unwrap();
+        pump(reader, &mut output, |_| None).await.unwrap();
 
         assert_eq!(output, input);
     }
@@ -142,9 +178,12 @@ mod tests {
         let mut output = Vec::new();
         let mut seen = Vec::new();
 
-        pump(reader, &mut output, |line| seen.push(parse_line(line)))
-            .await
-            .unwrap();
+        pump(reader, &mut output, |line| {
+            seen.push(parse_line(line));
+            None
+        })
+        .await
+        .unwrap();
 
         assert_eq!(seen.len(), 2);
         assert!(matches!(seen[0], Message::Request { .. }));
@@ -157,7 +196,56 @@ mod tests {
     async fn pump_handles_empty_input() {
         let input: &[u8] = b"";
         let mut output = Vec::new();
-        pump(input, &mut output, |_| {}).await.unwrap();
+        pump(input, &mut output, |_| None).await.unwrap();
         assert!(output.is_empty());
+    }
+
+    /// (i) A callback returning `Some` rewrites exactly that line and re-appends
+    /// the framing newline; an interleaved `None` line is forwarded verbatim.
+    #[tokio::test]
+    async fn pump_replaces_line_on_some() {
+        let input = b"replace me\nkeep me\n";
+        let reader = &input[..];
+        let mut output = Vec::new();
+
+        pump(reader, &mut output, |line| {
+            if line.starts_with("replace") {
+                Some("REPLACED".to_string())
+            } else {
+                None
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(output, b"REPLACED\nkeep me\n");
+    }
+
+    /// `Some` on a final line with no trailing newline must not invent one.
+    #[tokio::test]
+    async fn pump_some_preserves_absent_trailing_newline() {
+        let input = b"only line no newline";
+        let reader = &input[..];
+        let mut output = Vec::new();
+
+        pump(reader, &mut output, |_| Some("X".to_string()))
+            .await
+            .unwrap();
+
+        assert_eq!(output, b"X");
+    }
+
+    /// (ii) Phase 1 regression guard: a callback that always returns `None` is
+    /// byte-identical to the input, even for non-UTF8 and a no-trailing-newline
+    /// final line.
+    #[tokio::test]
+    async fn pump_none_is_byte_identical() {
+        let input: &[u8] = b"{\"a\":1}\n\xff\xfe non-utf8 \x00\nlast no newline";
+        let reader = input;
+        let mut output = Vec::new();
+
+        pump(reader, &mut output, |_| None).await.unwrap();
+
+        assert_eq!(output, input);
     }
 }

@@ -48,12 +48,14 @@ pub enum Message {
     Other,
 }
 
-/// Classify a single line. Never errors: a non-JSON or unexpected line is `Other`,
-/// which the pump forwards unchanged (fail-safe passthrough).
-pub fn parse_line(line: &str) -> Message {
-    let Ok(value) = serde_json::from_str::<Value>(line) else {
-        return Message::Other;
-    };
+/// Classify an already-parsed JSON-RPC value. A non-object value (array, scalar)
+/// is `Other`. Pure inspection — never allocates beyond the extracted strings.
+///
+/// The downstream flow parses each line to a `Value` exactly once (the tool-result
+/// payloads are the largest blobs we handle), classifies it here, and reuses the
+/// same owned value for the transform — so this operates on `&Value` rather than
+/// re-parsing. `parse_line` is the string entry point for the tiny request lines.
+pub fn classify(value: &Value) -> Message {
     let Some(obj) = value.as_object() else {
         return Message::Other;
     };
@@ -72,6 +74,16 @@ pub fn parse_line(line: &str) -> Message {
         (None, Some(id)) => Message::Response { id },
         (None, None) => Message::Other,
     }
+}
+
+/// Classify a single line. Never errors: a non-JSON or unexpected line is `Other`,
+/// which the pump forwards unchanged (fail-safe passthrough). Thin wrapper over
+/// [`classify`] — parses the line to a `Value`, then delegates.
+pub fn parse_line(line: &str) -> Message {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return Message::Other;
+    };
+    classify(&value)
 }
 
 /// Correlates request ids to their methods so the downstream flow can later ask
@@ -159,6 +171,16 @@ mod tests {
     fn json_non_object_is_other() {
         assert_eq!(parse_line("[1,2,3]"), Message::Other);
         assert_eq!(parse_line("42"), Message::Other);
+    }
+
+    #[test]
+    fn classify_operates_on_parsed_value_directly() {
+        // The downstream path classifies an already-parsed Value (no re-parse).
+        let v: Value =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":3,"result":{"content":[]}}"#).unwrap();
+        assert_eq!(classify(&v), Message::Response { id: RequestId::Num(3) });
+        // Non-object value is Other, same as the non-JSON line path.
+        assert_eq!(classify(&Value::Array(vec![])), Message::Other);
     }
 
     #[test]

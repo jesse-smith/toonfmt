@@ -6,6 +6,7 @@
 mod cli;
 mod jsonrpc;
 mod proxy;
+mod transform;
 
 use std::process::ExitCode;
 

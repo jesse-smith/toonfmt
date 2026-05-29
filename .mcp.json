@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "routing-probe": {
+      "command": "python3",
+      "args": ["tests/fixtures/json_mcp_stub.py"]
+    }
+  }
+}
