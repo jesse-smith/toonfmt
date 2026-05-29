@@ -1,0 +1,9 @@
+# cairn
+.cairn/
+
+# Added by cargo
+/target
+
+# Tooling state (machine-local)
+.serena/
+.claude/settings.local.json

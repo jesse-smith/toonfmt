@@ -1,0 +1,19 @@
+{
+  "constitution": "ARCHITECTURE.md",
+  "plansDir": "plans",
+  "quickLane": "quick-lane.md",
+  "structuredPaths": ["src/**"],
+  "verify": {
+    "commands": [
+      "cargo test",
+      "cargo build"
+    ]
+  },
+  "accept": {
+    "artifacts": [],
+    "checklist": [
+      "Feature behaves as described in the plan's Acceptance criteria",
+      "No regression in existing behavior"
+    ]
+  }
+}

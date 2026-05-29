@@ -1,0 +1,185 @@
+//! Minimal JSON-RPC envelope inspection.
+//!
+//! This phase only needs to *classify* a line (request / response / notification /
+//! other) and extract the `id` and `method` so requests can be correlated to
+//! responses by id. It deliberately does not model params, results, or errors —
+//! passthrough forwards the original bytes unchanged.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use serde_json::Value;
+
+/// A JSON-RPC request id: per the spec, a string or a number (or null, which we
+/// don't treat as correlatable). Floats are stored by their string form so the
+/// type stays `Hash`/`Eq` for use as a map key; integer and string ids — the
+/// only forms real MCP servers use — round-trip exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RequestId {
+    Str(String),
+    Num(i64),
+    /// Non-integer numeric id, preserved as its JSON text. Rare; kept for completeness.
+    Other(String),
+}
+
+impl RequestId {
+    fn from_value(v: &Value) -> Option<Self> {
+        match v {
+            Value::String(s) => Some(RequestId::Str(s.clone())),
+            Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    Some(RequestId::Num(i))
+                } else {
+                    Some(RequestId::Other(n.to_string()))
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Classification of a single JSON-RPC line. `Other` is the catch-all for
+/// anything we don't act on, including non-JSON lines (which must still forward).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Message {
+    Request { id: RequestId, method: String },
+    Response { id: RequestId },
+    Notification { method: String },
+    Other,
+}
+
+/// Classify a single line. Never errors: a non-JSON or unexpected line is `Other`,
+/// which the pump forwards unchanged (fail-safe passthrough).
+pub fn parse_line(line: &str) -> Message {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return Message::Other;
+    };
+    let Some(obj) = value.as_object() else {
+        return Message::Other;
+    };
+
+    let method = obj.get("method").and_then(Value::as_str);
+    let id = obj.get("id").and_then(RequestId::from_value);
+
+    match (method, id) {
+        (Some(method), Some(id)) => Message::Request {
+            id,
+            method: method.to_string(),
+        },
+        (Some(method), None) => Message::Notification {
+            method: method.to_string(),
+        },
+        (None, Some(id)) => Message::Response { id },
+        (None, None) => Message::Other,
+    }
+}
+
+/// Correlates request ids to their methods so the downstream flow can later ask
+/// "is this response the result of a `tools/call`?". Built this phase; only
+/// trace-logged for now — nothing acts on the correlation until the transform lands.
+#[derive(Debug, Clone, Default)]
+pub struct RequestTracker {
+    inner: Arc<Mutex<HashMap<RequestId, String>>>,
+}
+
+impl RequestTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the method associated with an outgoing request id.
+    pub fn record_request(&self, id: RequestId, method: String) {
+        self.inner
+            .lock()
+            .expect("RequestTracker mutex poisoned")
+            .insert(id, method);
+    }
+
+    /// Resolve and remove the method for a response id, if we recorded its request.
+    pub fn take_method(&self, id: &RequestId) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("RequestTracker mutex poisoned")
+            .remove(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_request_with_string_id() {
+        let m = parse_line(r#"{"jsonrpc":"2.0","id":"abc","method":"tools/call","params":{}}"#);
+        assert_eq!(
+            m,
+            Message::Request {
+                id: RequestId::Str("abc".into()),
+                method: "tools/call".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_request_with_numeric_id() {
+        let m = parse_line(r#"{"jsonrpc":"2.0","id":7,"method":"initialize"}"#);
+        assert_eq!(
+            m,
+            Message::Request {
+                id: RequestId::Num(7),
+                method: "initialize".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parses_response() {
+        let m = parse_line(r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#);
+        assert_eq!(m, Message::Response { id: RequestId::Num(7) });
+    }
+
+    #[test]
+    fn parses_notification() {
+        let m = parse_line(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+        assert_eq!(
+            m,
+            Message::Notification {
+                method: "notifications/initialized".into()
+            }
+        );
+    }
+
+    #[test]
+    fn non_json_is_other() {
+        assert_eq!(parse_line("this is not json"), Message::Other);
+        assert_eq!(parse_line(""), Message::Other);
+    }
+
+    #[test]
+    fn json_non_object_is_other() {
+        assert_eq!(parse_line("[1,2,3]"), Message::Other);
+        assert_eq!(parse_line("42"), Message::Other);
+    }
+
+    #[test]
+    fn tracker_records_and_takes() {
+        let t = RequestTracker::new();
+        t.record_request(RequestId::Num(1), "tools/call".into());
+        assert_eq!(t.take_method(&RequestId::Num(1)), Some("tools/call".into()));
+    }
+
+    #[test]
+    fn tracker_take_unknown_is_none() {
+        let t = RequestTracker::new();
+        assert_eq!(t.take_method(&RequestId::Num(99)), None);
+    }
+
+    #[test]
+    fn tracker_take_consumes() {
+        let t = RequestTracker::new();
+        t.record_request(RequestId::Str("x".into()), "initialize".into());
+        assert_eq!(t.take_method(&RequestId::Str("x".into())), Some("initialize".into()));
+        // second take returns None — entry was consumed
+        assert_eq!(t.take_method(&RequestId::Str("x".into())), None);
+    }
+}
