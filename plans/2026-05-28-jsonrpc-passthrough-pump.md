@@ -1,7 +1,7 @@
 # JSON-RPC Passthrough Pump — transparent MCP stdio proxy (no transform yet)
 
 **Date:** 2026-05-28
-**Status:** in progress  <!-- drafted | in progress | landed -->
+**Status:** landed (2026-05-28)  <!-- drafted | in progress | landed -->
 
 ## Goal
 Stand up the `toonfmt` Rust binary as a transparent MCP proxy: it spawns an upstream
