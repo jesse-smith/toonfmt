@@ -99,4 +99,4 @@ If a non-strict path is taken, **log it** (which upstream server, which tool) so
 ## Scope notes
 
 - Tools-only by default. Don’t convert `resources/read` — resources carry markdown/prose that conversion would corrupt.
-- This is a design spec, not an implementation. Build the JSON-RPC pump + transform incrementally; don’t one-shot.
+- Built incrementally, not one-shot. **Phase 1** (JSON-RPC passthrough pump) and **Phase 2** (`tools/call` result JSON→TOON transform, equality-gated `structuredContent` strip) are landed and live-verified against Claude Code. **Phase 3** — the config surface (`--skip-tool`, `--strictness {strict|json5}`, `--structured-content {keep|strip|minify}`) and the structured-only "add a content block" case (2a) — remains design-only. This doc is the constitution; the hardcoded Phase 2 defaults are strictness=json5, structured-content=equality-gated strip, no skip list.
