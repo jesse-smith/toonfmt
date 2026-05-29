@@ -19,11 +19,18 @@ It spawns the upstream server, pumps JSON-RPC both directions, and transforms on
 
 ## Why this shape (decisions already made — don’t relitigate)
 
-- **`content` is the write target, not `structuredContent`.** Coding-agent–style clients (Claude Code, LangChain MCP adapter by default) route the `content` text blocks into the model’s context; `structuredContent` is the programmatic/code-mode channel and is often *not* forwarded to the model. So to actually save model tokens, TOON must land in a `content` text block.
-  - ⚠️ Not confirmed from a primary source that Claude Code reads `content` and ignoress `structuredContent`. High-prior assumption. Verify with MCP Inspector before trusting in production (log the on-wire `CallToolResult`, check what the model references next turn).
+- **`content` is the write target — but `structuredContent` *shadows* it (MEASURED 2026-05-28, Claude Code).** TOON still goes in a `content` text block, but the routing rule is the **opposite** of what this doc originally assumed. Live probe (labelled sentinels via `tests/fixtures/json_mcp_stub.py`):
+  - both `content` + `structuredContent` present → model receives **only `structuredContent`** (raw JSON); the content block is dropped.
+  - `content` only → model receives the `content` text block. ✓
+  - `structuredContent` only → model receives `structuredContent`.
+  - **Rule:** `structuredContent` shadows `content` — present → model sees only it; absent → model sees content. So TOON-in-content reaches the model **only if no `structuredContent` shadows it.** Independently corroborated by dbmcp, which emits content-only TOON (no structuredContent) and whose TOON the model does read.
+  - **Consequence — settled (2026-05-29): equality-gated strip is the default.** When a result carries *both* a transformable content block and a `structuredContent`, leaving structuredContent intact makes the transform worse than a no-op (we TOON-encode content the model never reads, while it reads the untouched JSON). The fix: **strip `structuredContent` iff a content block we successfully transformed parses to a `Value` structurally equal to it; otherwise keep it (and log the non-equivalent server).** This is loss-free *by construction*, not merely by trusting the spec's SHOULD — see the spec basis and the equality semantics below.
 - **Parse every text block independently; don’t reconcile against `structuredContent`.** `structuredContent` doesn’t map to specific `content[]` blocks, so having it doesn’t save the per-block parse. You have to iterate `content[]` and attempt-parse text blocks anyway. This makes the design simpler than a “read from structuredContent, write to content” split.
-- **Don’t TOON-convert `structuredContent` itself.** It has a JSON-object contract on the wire; TOON-as-string would violate it. It arrives already parsed/valid via the JSON-RPC envelope (if it weren’t valid JSON the whole message wouldn’t have parsed). Leave intact.
-- **Client variance exists.** Some clients (e.g. Google ADK) forward the *entire* result envelope to the model, including `structuredContent`. For those, TOON in `content` + raw JSON in `structuredContent` doubles tokens. Hence the optional `structuredContent` handling flag below. Default target is content-routing clients.
+- **Spec basis for equality-gated strip (primary source, MCP spec).** *"For backwards compatibility, a tool that returns structured content SHOULD also return the serialized JSON in a TextContent block."* The spec's own example shows the content block holding the serialized JSON of the *same* `structuredContent` object — they're meant to be identical data. So in the spec-compliant both-present case, the content block **is** a copy of structuredContent; once we've TOON'd that block, structuredContent is a redundant raw-JSON duplicate that only shadows our TOON. Stripping it loses nothing. **But the guarantee is a SHOULD, not a MUST** — a non-compliant server could put separate or partially-overlapping data in the two channels, and nothing structural prevents it. We therefore don't *trust* the SHOULD; we *verify* it per-result with a structural `Value` equality check (we already hold both as parsed `Value`s — the structuredContent subtree from the envelope parse, the content value from the transform parse — so the check is one `==`, not an added parse). Equal → strip; unequal → keep + log. False-negative (declining a safe strip) costs only savings; false-positive (stripping unique data) is eliminated.
+  - **Equality semantics (with `preserve_order`):** `Value` equality is **order-insensitive for object keys** (`Value::Object` wraps an `IndexMap`, whose `PartialEq` compares key→value membership regardless of insertion order — so a server reordering keys still compares equal and still strips) but **order-sensitive for array elements** (`Value::Array` is a `Vec`; positional). A server that reordered an array relative to structuredContent compares unequal → keep + log. That's correct, not just safe: array order can be semantically meaningful (sorted/ranked rows), so divergent orderings aren't provably the same data. Number-format drift (`1` vs `1.0`) likewise compares unequal → keep. Every permutation fails safe toward keep.
+- **Don’t TOON-convert `structuredContent` itself — MEASURED non-viable (2026-05-29).** It has a JSON-object contract on the wire (spec types it as a `record`/object; `outputSchema` makes servers MUST conform and clients SHOULD validate). A string-valued (TOON) structuredContent doesn't degrade gracefully — it **breaks the tool call**: the `probe_structured_string` stub returned a TOON string in the field, and Claude Code rejected the *entire* response client-side with a Zod error (`expected record, received string`, path `structuredContent`) before forwarding anything to the model. Neither the content block nor the TOON string reached the model. So "TOON the field" (option 2b) is not merely risky — it's a hard error on the primary client. Off the table. (This also confirms equality-gated strip is safe: a record-typed-or-absent field always validates; strip can never trigger this error.)
+- **Structured-only / no-text-block case (legal, SHOULD-violating) is a deferred gap.** When `structuredContent` is present but `content[]` has no transformable text block, equality-gated strip is a deliberate no-op (we wrote no TOON → we strip nothing → model reads raw JSON, no savings). The only type-safe way to deliver TOON there is to **add** a content text block (`content[].text` is a string by contract, always valid) — option "2a". Reopened as a candidate but **deferred to Phase 3** with the flags; Phase 2 leaves this shape as a documented no-op.
+- **Client variance exists.** Some clients (e.g. Google ADK) forward the *entire* result envelope to the model, including `structuredContent`. Equality-gated strip is the right default for them too (the redundant copy is removed; non-equivalent data is preserved). The `--structured-content {keep|strip|minify}` flag (Phase 3) lets schema-validating consumers force `keep`.
 
 ## Core loop
 
@@ -49,16 +56,19 @@ for block in result.content:               # heterogeneous array
             leave block unchanged           # genuinely not convertible (prose, etc.)
             continue
     block.text = toon_encode(obj)
+    transformed_values.append(obj)   # remember what we successfully parsed+converted
 
-# structuredContent handling (see flag):
-#   default: leave intact
-#   --strip-structured-content: remove it (suppress JSON copy for envelope-forwarding clients)
-#   optional: minify it (small win; only if a consumer forwards it to the model)
+# structuredContent handling — equality-gated strip (default):
+#   if structuredContent present AND any value in transformed_values == structuredContent (structural Value ==):
+#       remove structuredContent          # redundant raw-JSON copy; equivalent data now lives in content as TOON
+#   elif structuredContent present:
+#       leave intact + log non-equivalent server   # separate/partial/reordered data — don't delete what we didn't preserve
+#   (Phase 3 flag --structured-content {keep|strip|minify} overrides this default.)
 ```
 
 **Fallback is per-block, not per-result** — one un-convertible block must not tank a multi-block result.
 
-**Edge case:** if `structuredContent` is present but `content[]` has no text block (legal, some servers do this), and you want the model to see TOON, you must *add* a text block rather than replace one. Decide whether that’s in scope; default is “only convert existing text blocks.”
+**Edge case (Phase 3):** if `structuredContent` is present but `content[]` has no text block (legal, SHOULD-violating), the equality-gated strip is a no-op (nothing transformed → nothing stripped → model reads raw JSON). Delivering TOON there requires *adding* a text block (option 2a); deferred to Phase 3. Phase 2 leaves this shape unchanged.
 
 ## JSON5 strictness boundary
 
@@ -71,7 +81,7 @@ If a non-strict path is taken, **log it** (which upstream server, which tool) so
 ## Config surface
 
 - `--skip-tool <glob>` — tools whose results should never be converted (free-form text tools).
-- `--structured-content {keep|strip|minify}` — default `keep`.
+- `--structured-content {keep|strip|minify}` — default is **equality-gated strip** (strip iff a transformed content block is structurally equal to it; else keep). `keep` forces leave-intact (for schema-validating consumers); `strip` forces unconditional removal; `minify` compacts it in place. Phase 3 — Phase 2 hardcodes the equality-gated default.
 - `--strictness {strict|json5}` — default `json5`.
 - (optional) inject a short TOON syntax cheatsheet into the upstream’s `serverInfo.instructions` during `initialize` so consuming clients that pipe instructions into context don’t each need to add it to their system prompt. ~20 LOC, biggest UX win at the wrapper boundary. (Skipped if the consuming model already handles TOON reliably — which it does in this user’s setup.)
 
@@ -83,7 +93,7 @@ If a non-strict path is taken, **log it** (which upstream server, which tool) so
 
 ## Validation before trusting it
 
-1. **Confirm the routing assumption**: MCP Inspector against the target client (Claude Code) to verify the model reads `content` and not `structuredContent`. This is the load-bearing assumption for the whole design.
+1. ~~**Confirm the routing assumption**: MCP Inspector against the target client (Claude Code) to verify the model reads `content` and not `structuredContent`.~~ **DONE 2026-05-28 — and the assumption was INVERTED.** Measured directly in a Claude Code session (sentinel stub): `structuredContent` *shadows* `content`. The write-to-content strategy holds only when structuredContent doesn't shadow it (see the corrected decision bullet above). This was the load-bearing assumption; it is now measured, not assumed.
 1. TOON comprehension on the actual model is **already confirmed** in this user’s setup (TOON already in use for a SQL MCP, model performs better than with JSON) — no need to re-validate.
 
 ## Scope notes
