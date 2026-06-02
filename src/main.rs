@@ -10,7 +10,9 @@ mod transform;
 
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
+
+use cli::Upstream;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -34,9 +36,18 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<ExitCode> {
-    let cmd = cli::parse_args(std::env::args().skip(1))?;
-    let status = proxy::run(cmd).await?;
-    // Propagate the child's exit code where possible.
-    let code = status.code().unwrap_or(1);
-    Ok(ExitCode::from(code as u8))
+    match cli::parse_args(std::env::args().skip(1))? {
+        Upstream::Stdio(cmd) => {
+            let status = proxy::run(cmd).await?;
+            // Propagate the child's exit code where possible.
+            let code = status.code().unwrap_or(1);
+            Ok(ExitCode::from(code as u8))
+        }
+        // Wired in A4 (HTTP driver). Resolve the bearer token now so a
+        // misconfigured `--bearer-env` fails fast even before the driver lands.
+        Upstream::Http(http) => {
+            let _bearer = http.resolve_bearer()?;
+            bail!("HTTP upstream (`--http`) is not wired yet; lands in task A4");
+        }
+    }
 }

@@ -159,7 +159,12 @@ locally** unless the transport's async send/receive ordering forces correlation.
      SLICE B = OAuth, built on A once A is verified. Each slice ends at cairn-accept. -->
 
 ### Slice A — bearer/none HTTP upstream
-- [ ] **A0 — composition smoke test (zero toonfmt code; status-quo sanity, NOT a fallback).**
+<!-- A0 RESEQUENCED (2026-06-02, user decision): deferred to the A6 real-MCP batch.
+  A0 needs a live HTTP MCP URL; its value is highest pointed at a target the user
+  actually cares about (the Databricks SQL MCP, also A6's target). A1 already gave
+  the viability verdict, so A0 is a non-load-bearing reality check — run it in the
+  same USER-GATED session as A6 rather than picking a random public MCP now. -->
+- [ ] **A0 — composition smoke test (zero toonfmt code; status-quo sanity, NOT a fallback). [DEFERRED → A6 batch]**
   Run `toonfmt -- npx mcp-remote <a real HTTP MCP url>` against a live HTTP target; confirm the
   `tools/call` TOON transform fires over an HTTP-delivered result (and over an SSE-delivered
   one if the target streams). Record findings (did it work? SSE seen? any envelope surprises?)
@@ -193,7 +198,7 @@ locally** unless the transport's async send/receive ordering forces correlation.
   `Custom`-by-necessity. Some message rmcp won't carry *either* way, **or** handshake incompatible
   with proxying the client's own `initialize` → **only then** hand-rolled `reqwest` + `sse-stream`
   (re-scope A4 only). Document the map + verdict in this plan before A4.
-- [ ] **A2 — CLI: `Upstream` enum + `--http`/`--bearer-env` (`src/cli.rs`).** Replace the
+- [x] **A2 — CLI: `Upstream` enum + `--http`/`--bearer-env` (`src/cli.rs`).** Replace the
   bare `UpstreamCmd` return with `enum Upstream { Stdio(UpstreamCmd), Http(HttpUpstream) }`
   where `HttpUpstream { url: String, bearer_env: Option<String> }`. Parse: presence of
   `--http <url>` selects HTTP (optionally `--bearer-env <VAR>`); the existing `-- <program>
