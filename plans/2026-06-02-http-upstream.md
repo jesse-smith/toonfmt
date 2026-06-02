@@ -440,10 +440,21 @@ locally** unless the transport's async send/receive ordering forces correlation.
   closure: it exercises the binary's actual browser seam. Token reuse is proven by pointing
   `TOONFMT_BROWSER_CMD=false` on the second serve, so any stray browser launch would diverge.
   `tests/oauth_e2e.rs::explicit_oauth_login_persist_serve_toon_reuse` green; 71 tests total.
-- [ ] **B6 — MANUAL GATE (keeper acceptance).** Run the explicit flow in real Claude Code against
-  the stub (or a user-supplied OAuth MCP): `login` once, then confirm the serve path returns TOON'd
-  results in-client. *Also* probe — for Slice C's benefit — whether Claude Code tolerates a
-  slow/human-paced `initialize` and surfaces stderr; record the answer in the plan + memory.
+- [x] **B6 — MANUAL GATE (keeper acceptance).** PASSED in real Claude Code (2026-06-02) against a
+  real OAuth MCP — **Cloudflare** `https://bindings.mcp.cloudflare.com/mcp` (Workers bindings;
+  advertises `authorization_code`+`refresh_token`+S256, so it exercises the auto-refresh persist path
+  the original Parallel target couldn't). `login` once (real browser + consent) → token persisted →
+  serve `--oauth` connected in-client: Claude Code's own MCP log shows
+  `Successfully connected (transport: stdio) in 1608ms`, `serverVersion workers-bindings 0.5.0`;
+  direct-drive confirmed `tools/call workers_list` → TOON. **Findings recorded in memory
+  ([[b6-claude-code-oauth-findings]]):** (1) Claude Code **captures subprocess stderr verbatim** in
+  `~/Library/Caches/claude-cli-nodejs/<proj>/mcp-logs-<server>/*.jsonl` (`"Server stderr: …"`) but
+  shows only "disconnected" in the `/mcp` menu — stderr is *logged, not surfaced live*; (2) **connect
+  timeout = 30000ms** (consistent across launches; fail-fast closed in ~18ms). **UX gotcha that bit
+  us:** the store is keyed by the **exact URL string**, so `login --http <url>` must byte-match the
+  serve `--http <url>` (logging in with the bare host but serving `…/mcp` → different hash →
+  fail-fast "disconnected"). Candidate polish: `login` prints the exact `--http` value and/or
+  canonicalizes the URL before hashing.
 - [ ] **B7 — Docs + cairn-verify/accept (Slice B).** `ARCHITECTURE.md`: OAuth moves from "next
   slice" to **supported (explicit `login`)**; document the `login` subcommand, `--oauth`, token
   storage (`~/.toonfmt-auth/`). Note interactive auto-browser as Slice C. `clippy -D warnings` clean,
@@ -458,8 +469,14 @@ locally** unless the transport's async send/receive ordering forces correlation.
 - [ ] **C1 — stderr-inline (mcp-remote model).** Serve path with `HttpAuth::OAuth` + no stored
   token, behind an explicit opt-in (`--oauth-interactive`): call the B3 driver with
   `browser = open::that`, prompt to **stderr**, complete auth *before* `initialize`. e2e with the
-  test browser closure. **Keep iff** B6 showed Claude Code waits on `initialize` *and* surfaces
-  stderr; else discard.
+  test browser closure. **B6 verdict — viable-but-weak, not auto-keep:** Claude Code *does* tolerate
+  a slow `initialize` (30s connect timeout, measured) AND *does* capture stderr — but only into a
+  cache log (`mcp-logs-*`), NOT the visible `/mcp` menu. So an inline stderr prompt would be
+  technically reachable within ~30s yet **invisible to a user not tailing the log** — the auth URL
+  the user must click never shows up where they'd look. Decision deferred to Slice C start: likely
+  **lower priority than C2**, or pivot C1 to "auto-open the browser without needing the user to see a
+  prompt" (the URL launches; nothing to read). Discard only if even the auto-open offers nothing over
+  explicit `login`.
 - [ ] **C2 — elicitation spike.** Investigate prompting the user *through Claude Code* via MCP
   `elicitation/create` instead of stderr. **Two unknowns to settle first (spike, don't build):**
   (1) does Claude Code honor elicitation from a *stdio* server at all? (docs unconfirmed);

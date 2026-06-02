@@ -24,6 +24,14 @@
         "--http",
         "https://search.parallel.ai/mcp"
       ]
+    },
+    "cloudflare-oauth": {
+      "command": "/Users/jsmith79/Documents/Projects/SideProjects/toonfmt/target/release/toonfmt",
+      "args": [
+        "--http",
+        "https://bindings.mcp.cloudflare.com/mcp",
+        "--oauth"
+      ]
     }
   }
 }

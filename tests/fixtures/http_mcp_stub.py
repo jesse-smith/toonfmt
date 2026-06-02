@@ -400,7 +400,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    # Default: ephemeral port (the headless e2e reads `PORT <n>` from stdout). For a
+    # manual in-client B6 run, set TOONFMT_STUB_PORT so the port is known ahead of
+    # time and can be hard-coded in `.mcp.json` (Claude Code launches toonfmt
+    # separately from this stub, so it can't read an ephemeral port back).
+    bind_port = int(os.environ.get("TOONFMT_STUB_PORT", "0"))
+    server = ThreadingHTTPServer(("127.0.0.1", bind_port), Handler)
     port = server.server_address[1]
     # Contract with the e2e: the port is the FIRST line of stdout, flushed.
     sys.stdout.write(f"PORT {port}\n")
