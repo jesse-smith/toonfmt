@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-02  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-05-28-toon-transform.md (Phase 2 — transform, landed)
-**Status:** in progress  <!-- drafted | in progress | landed -->
+**Status:** Slice A landed (2026-06-02) · Slice B (OAuth) not started  <!-- drafted | in progress | landed -->
 
 ## Goal
 toonfmt is stdio↔stdio today: it spawns an upstream child and pumps JSON-RPC over its
@@ -164,7 +164,15 @@ locally** unless the transport's async send/receive ordering forces correlation.
   actually cares about (the Databricks SQL MCP, also A6's target). A1 already gave
   the viability verdict, so A0 is a non-load-bearing reality check — run it in the
   same USER-GATED session as A6 rather than picking a random public MCP now. -->
-- [ ] **A0 — composition smoke test (zero toonfmt code; status-quo sanity, NOT a fallback). [DEFERRED → A6 batch]**
+<!-- A0 RESULT (2026-06-02): PASS. `toonfmt -- npx mcp-remote <databricks-url> --header
+  "Authorization: Bearer $DATABRICKS_TOKEN"` (toonfmt as a stdio wrapper around the
+  mcp-remote child) drove initialize + initialized + a real SHOW CATALOGS tools/call;
+  the result came back TOON-encoded (statement_id/manifest/columns…), state SUCCEEDED.
+  Confirms the transform fires over HTTP-origin payloads delivered via the mcp-remote
+  composition path too — not just native --http. (Still a non-goal to SHIP this path;
+  the native --http driver is what eliminates the Node dependency. A0 is just the
+  reality check.) -->
+- [x] **A0 — composition smoke test (zero toonfmt code; status-quo sanity, NOT a fallback). [ran in A6 batch — PASS]**
   Run `toonfmt -- npx mcp-remote <a real HTTP MCP url>` against a live HTTP target; confirm the
   `tools/call` TOON transform fires over an HTTP-delivered result (and over an SSE-delivered
   one if the target streams). Record findings (did it work? SSE seen? any envelope surprises?)
@@ -271,7 +279,10 @@ locally** unless the transport's async send/receive ordering forces correlation.
   own buffering) and only becomes a test of *our* code in the hand-rolled fallback. Comment it as
   such so its evidentiary weight isn't overstated. The toonfmt-owned behavior under test here is
   the bridge wiring (1, 2, 4) + that the transform fired identically to the stdio path.
-- [ ] **A6 — real-MCP verification (USER-GATED).** The stub proves wiring; this proves
+- [x] **A6 — real-MCP verification (USER-GATED).** *Done 2026-06-02 — passed on two real
+  servers (Databricks SQL, Parallel Web Search); the real-SSE sub-item is accepted as
+  stub-covered by explicit user decision (see the "SSE NOT YET EXERCISED" note + the
+  KNOWN LIMITATION in Acceptance criteria).* The stub proves wiring; this proves
   reality. **User adds the targets when ready** — primary: the **Databricks SQL MCP** (token
   auth). Drive a real `tools/call` through `toonfmt --http <databricks-url> --bearer-env <VAR>`
   and confirm a real result returns TOON'd, data faithful. **Also** verify against a target the
@@ -336,7 +347,10 @@ locally** unless the transport's async send/receive ordering forces correlation.
   (cargo build + cargo test green, 51 tests, clippy -D warnings clean). The box
   stays unchecked only because A7 also bundles cairn-ACCEPT, which gates on A6
   (the user-supplied real-MCP check). Flip to [x] when A6 lands. -->
-- [ ] **A7 — docs + cairn-verify/accept for Slice A.** `ARCHITECTURE.md`: record the
+- [x] **A7 — docs + cairn-verify/accept for Slice A.** *Done 2026-06-02 — docs committed
+  (1c9a917); cairn-verify green (52 tests, clippy -D warnings clean); cairn-accept run,
+  Slice A accepted with the real-SSE gap documented as a known limitation.*
+  `ARCHITECTURE.md`: record the
   **semantic-vs-byte-identical passthrough amendment** (HTTP leg); add HTTP upstream to the
   transport description; add `--http`/`--bearer-env` to the config surface; note OAuth as the
   **next slice** (not merely deferred); renumber the config-flags phase to **Phase 4**; update
@@ -448,9 +462,16 @@ locally** unless the transport's async send/receive ordering forces correlation.
   (Phase 1 property intact — existing stdio e2e + pump tests still green).
 - The equality-gated `structuredContent` strip and the per-block JSON→TOON fallback behave
   identically on the HTTP path (shared, transport-blind transform).
-- **Real-MCP check (A6):** a live `tools/call` against the user-supplied Databricks SQL MCP
-  (token auth) returns TOON'd, data faithful; and a user-supplied SSE-streaming target
-  confirms buffer-until-complete on a real server.
+- **Real-MCP check (A6):** ✅ a live `tools/call` against the Databricks SQL MCP (token
+  auth) returns TOON'd, data faithful; corroborated on a second real server (Parallel Web
+  Search, no auth). **KNOWN LIMITATION (accepted by user 2026-06-02):** the
+  "real SSE-streaming target confirms buffer-until-complete on a real server" sub-item is
+  **NOT** met by a real server — both targets answered `application/json` (Parallel
+  explicitly doesn't support SSE). Real-SSE buffer-until-complete is covered **only by the
+  stub** (`probe_sse` / `probe_sse_split`). Accepted because the transform is
+  transport-blind and proven on two real servers, and on the rmcp path SSE assembly is
+  owned by rmcp (fragment-transform is structurally impossible — see A1). If a genuinely
+  SSE-streaming target appears later, re-run this check to close the gap fully.
 - `ARCHITECTURE.md` reflects the HTTP upstream, the passthrough amendment, the renumbered
   Phase 4, and OAuth as the next slice; A1's rmcp `Transport`-drivability verdict is recorded.
 
