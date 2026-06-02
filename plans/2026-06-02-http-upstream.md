@@ -283,6 +283,40 @@ locally** unless the transport's async send/receive ordering forces correlation.
   that. If something does, the GET-stream-forwarding addendum is required before Slice A lands.
   Record all outcomes in this plan. (This is the verification step the user explicitly wants —
   it gates Slice A landing, alongside cairn-accept.)
+<!-- A6 RESULT — real-MCP verification (2026-06-02), against the LIVE Databricks SQL MCP
+  (https://adb-3403296355644133.13.azuredatabricks.net/api/2.0/mcp/sql, token auth via
+  --bearer-env DATABRICKS_TOKEN). Driven directly through the release binary's native
+  --http path (the rmcp driver), not the stub. ALL PASS:
+  - Handshake: initialize → real DatabricksMCPServer response forwarded; initialized
+    accepted; bearer auth worked (no 401).
+  - tools/list: real toolset (execute_sql, execute_sql_read_only, poll_sql_result),
+    structurally intact.
+  - tools/call (execute_sql_read_only, "SHOW CATALOGS"): state SUCCEEDED, 19 real
+    catalogs returned, result came back TOON-encoded (statement_id/manifest/
+    columns[1]{...}/data_array[19] are TOON, not JSON) — transform fired on a real
+    payload, data faithful (19 rows, real names: bmtct, caboodle_src, cerner_src, …).
+  - GET-stream check: NO server-initiated message observed (RUST_LOG=warn stderr clean
+    across handshake + tools/list + tools/call) → the GET-stream DEFERRAL IS JUSTIFIED
+    for this target. (No tracing::warn! fired.)
+  - structuredContent: absent on the result → no strip needed (Databricks is content-only,
+    like dbmcp).
+
+  BUG FOUND (not an A6 blocker; the transform is proven): the driver tears down the
+  instant client stdin closes (rx.recv() → None → break), abandoning in-flight
+  requests. A request immediately followed by EOF loses its response. Harmless for a
+  synchronous client that keeps stdin open (Claude Code), but a real correctness gap —
+  a quick `printf ... | toonfmt --http` drops the tools/call response unless stdin is
+  held open until the reply arrives. FIX (follow-up): on stdin EOF, stop sending but
+  keep draining transport.receive() until any outstanding request ids are answered (or
+  a timeout), THEN tear down. Tracked for a Slice-A-addendum / hardening commit.
+
+  SSE-STREAMING TARGET: still needed from the user (Databricks returned application/json,
+  not chunked SSE, for SHOW CATALOGS) to confirm buffer-until-complete on a real SSE
+  server. A6 is otherwise satisfied for the primary (Databricks) target.
+
+  A0 (mcp-remote composition) folded into this batch: .mcp.json has
+  `databricks-toon-viamcpremote` (toonfmt -- npx mcp-remote …) for the post-restart
+  in-client check; not yet exercised from the shell. -->
 <!-- A7 STATUS (2026-06-02): docs DONE + committed (1c9a917); cairn-verify DONE
   (cargo build + cargo test green, 51 tests, clippy -D warnings clean). The box
   stays unchecked only because A7 also bundles cairn-ACCEPT, which gates on A6
