@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-02  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-05-28-toon-transform.md (Phase 2 — transform, landed)
-**Status:** Slice A landed (2026-06-02) · Slice B (OAuth) not started  <!-- drafted | in progress | landed -->
+**Status:** Slice A landed (2026-06-02) · Slice B (explicit OAuth) drafted, in progress · Slice C (interactive OAuth) deferred  <!-- drafted | in progress | landed -->
 
 ## Goal
 toonfmt is stdio↔stdio today: it spawns an upstream child and pumps JSON-RPC over its
@@ -358,31 +358,112 @@ locally** unless the transport's async send/receive ordering forces correlation.
   "rmcp Transport IS/ISN'T drivable raw"). cairn-verify (zero warnings, clippy `-D warnings`,
   `cargo test` green incl. new e2e when python3 present), then cairn-accept Slice A.
 
-### Slice B — OAuth
+### Slice B — explicit-only OAuth (the landing slice)
 > **Scope honesty:** "additive flag-flip on a proven base" describes the *architecture*, not the
 > *effort*. OAuth in a CLI proxy is a real chunk of work — browser launch, a localhost redirect
 > listener (bind a port, receive the auth code), code↔token exchange, persistent token storage,
 > and refresh. rmcp's `auth` feature carries the protocol mechanics, but the UX/lifecycle plumbing
 > is ours. mcp-remote spends ~500 LOC here. B is correctly gated behind a landed Slice A, but it
-> is **not small** — estimate it as its own multi-task slice, not a wiring afterthought.
-- [ ] **B0 — verify Slice A landed first.** Slice B does not start until A is at
-  `cairn-accept` with the real-MCP check (A6) done. Hard dependency.
-- [ ] **B1 — enable rmcp `auth` feature; wire OAuth state.** Add the `auth` feature to the
-  `rmcp` dep; build clean. Wire `OAuthState`/`AuthorizationManager` → `AuthClient` into the
-  same `StreamableHttpClientTransport` (rmcp injects bearer tokens automatically). CLI: add the
-  OAuth selector to the `HttpUpstream` shape from A2 (e.g. `--oauth` plus discovery/callback
-  config) without disturbing the bearer path.
-- [ ] **B2 — token cache / callback handling.** Persist tokens (path TBD in plan-mode
-  fleshing — analogous to mcp-remote's `~/.mcp-auth/` per-URL isolation); handle the local
-  callback for the authorization-code redirect; refresh on expiry (rmcp handles refresh given
-  the stored refresh token).
-- [ ] **B3 — OAuth verification (USER-GATED).** **User supplies an OAuth MCP target** (req #1
-  the user named). Confirm the full flow: unauthorized → browser auth → token stored →
-  `tools/call` result returns TOON'd; second run reuses the cached token without re-auth.
-  Record in plan.
-- [ ] **B4 — docs + cairn-verify/accept for Slice B.** `ARCHITECTURE.md`: OAuth moves from
-  "next slice" to "supported"; document the auth config surface and token storage. cairn-verify
-  clean, then cairn-accept Slice B.
+> is **not small** — its own multi-task slice, not a wiring afterthought.
+>
+> **Split decision (2026-06-02, with user):** Slice B is **explicit-only** — a `toonfmt login`
+> command, deterministic (the serve path only ever *loads* tokens, never blocks `initialize` on a
+> human), so it lands independent of any Claude Code behavior we don't control. The interactive
+> "auto-launch the browser" variants (stderr-inline + an elicitation spike) are deferred to
+> **Slice C** so they can't block the slice that ships.
+>
+> **Topology fact (verified vs. Claude Code docs):** to Claude Code, toonfmt is a *stdio
+> subprocess*; its native OAuth/`/mcp`-reauth fires only for HTTP/SSE servers *it* connects to, on
+> a 401/403 — it is **blind to a stdio subprocess's upstream backend** ("has no effect on stdio
+> servers"). So toonfmt must drive the browser flow itself (this is why mcp-remote exists).
+>
+> **rmcp split (verified, 1.7.0):** rmcp's `auth` feature owns the *protocol* (OAuth 2.1 discovery,
+> dynamic client registration, PKCE, code↔token exchange, **auto-refresh**); we own *lifecycle/UX*
+> (browser launch, localhost callback listener, **persistent** cross-process token storage — the
+> default `InMemoryCredentialStore` doesn't persist, and login/serve are separate processes).
+> **Timing constraint:** rmcp requires auth to **complete before `initialize`** — no lazy
+> 401-upgrade (`AuthClient` errors `AuthorizationRequired` on 401). This is *why* inline-browser is
+> Slice C (would block the host's startup on a human) and explicit `login` is the safe keeper.
+> **Concrete API:** `OAuthState.start_authorization()` → auth URL → caller opens browser + binds
+> localhost listener → `handle_callback(code, state)` → `into_authorization_manager()` →
+> `AuthClient::new(reqwest, am)` → `StreamableHttpClientTransport::with_client(client, config)`.
+> `CredentialStore` = async `load/save/clear` over `StoredCredentials { client_id, token_response }`.
+> Spike target: rmcp `examples/clients/src/auth/oauth_client.rs`.
+
+**Integration shape (decided):**
+- **`http_upstream::run` becomes generic** over `T: Transport<RoleClient>` (the loop already uses
+  only `send`/`receive`/`close`). `main` constructs the right concrete transport per auth mode and
+  calls the monomorphized `run`. Bearer = `from_config` (`…<reqwest::Client>`); OAuth =
+  `with_client(AuthClient::new(reqwest, am))` (`…<AuthClient<reqwest::Client>>`) — different
+  concrete types unified only by the trait, so auth mode is a **construction-time** branch, never a
+  runtime branch inside the loop.
+- **CLI command split.** `parse_args -> Command` where `Command = Serve(Upstream) | Login(LoginArgs)`.
+  `HttpUpstream.bearer_env: Option<String>` → `auth: HttpAuth` where
+  `enum HttpAuth { None, Bearer { env: String }, OAuth }` (bearer-vs-oauth mutually exclusive at the
+  type level — invalid states unrepresentable).
+- **Token storage = file store.** `~/.toonfmt-auth/<url-hash>.json`, `0600`, per-URL isolation by
+  hashing the upstream URL. (`sha2` for the hash; `directories`/`dirs` for the home dir.)
+
+- [x] **B0 — verify Slice A landed first.** Slice B does not start until A is at
+  `cairn-accept` with the real-MCP check (A6) done. Hard dependency. **(done — A landed `bed3bc5`.)**
+- [ ] **B1 — Cargo `auth` feature + CLI command split.** Add `auth` to `rmcp` features; build clean.
+  Restructure `src/cli.rs`: `Command::{Serve, Login}`, `HttpAuth { None, Bearer{env}, OAuth }`; add
+  `--oauth` (serve) and the `login` grammar (`toonfmt login --http <url>`). Red-green parser tests
+  (oauth/bearer mutual exclusion, `login` parse, dangling flags, existing stdio/bearer tests still
+  pass). Update `main.rs` dispatch skeleton (`Login` arm may `todo!()` until B4).
+- [ ] **B2 — File `CredentialStore`.** New `src/credential_store.rs`: implement rmcp's
+  `CredentialStore` (`async load/save/clear` over `StoredCredentials`) backed by
+  `~/.toonfmt-auth/<url-hash>.json` at `0600`. Unit tests: save→load round-trip, `clear`, per-URL
+  isolation (two URLs → two files), perms assertion, missing-file → `Ok(None)`.
+- [ ] **B3 — OAuth flow driver (SPIKE-FIRST).** **First: read rmcp's
+  `examples/clients/src/auth/oauth_client.rs`** to pin the exact `OAuthState` API (redirect-URI
+  config, who binds the listener, `start_authorization`/`handle_callback` signatures) — same spike
+  discipline that de-risked A1; record durable facts in memory. Then `src/oauth.rs`: bind a
+  localhost callback listener, build `redirect_uri`, run discovery→register→authorize (invoke an
+  **injected** `browser: impl Fn(&str) -> Result<()>`)→await callback→`handle_callback`→
+  `into_authorization_manager()`; persist via the B2 store. Returns an `AuthorizationManager`.
+- [ ] **B4 — `toonfmt login` + serve-path OAuth wiring.** `login` calls B3 with
+  `browser = open::that`, persists tokens, prints success to **stderr**. Serve path with
+  `HttpAuth::OAuth`: **load** from the B2 store → `AuthClient::new(reqwest, am)` → `with_client(...)`
+  → generic `run`. No stored token → **fail fast** to stderr ("run `toonfmt login <url>` first"); the
+  serve path **never** launches a browser (keeps `initialize` non-blocking — the property that lets
+  B stand alone).
+- [ ] **B5 — OAuth stub + explicit-flow e2e.** Extend `tests/fixtures/http_mcp_stub.py` (zero-dep
+  stdlib) with OAuth endpoints: `.well-known` discovery, dynamic client registration, an authorize
+  endpoint that 302s to the callback with `code`+`state`, a token endpoint (exchange + refresh); the
+  MCP endpoint requires the issued bearer. New `tests/oauth_e2e.rs`: drive `login` with a **test
+  browser closure** (reqwest GET of the auth URL — no human) → assert token persisted → run serve →
+  `tools/call` returns **TOON** → second serve **reuses** the cached token (no re-auth).
+- [ ] **B6 — MANUAL GATE (keeper acceptance).** Run the explicit flow in real Claude Code against
+  the stub (or a user-supplied OAuth MCP): `login` once, then confirm the serve path returns TOON'd
+  results in-client. *Also* probe — for Slice C's benefit — whether Claude Code tolerates a
+  slow/human-paced `initialize` and surfaces stderr; record the answer in the plan + memory.
+- [ ] **B7 — Docs + cairn-verify/accept (Slice B).** `ARCHITECTURE.md`: OAuth moves from "next
+  slice" to **supported (explicit `login`)**; document the `login` subcommand, `--oauth`, token
+  storage (`~/.toonfmt-auth/`). Note interactive auto-browser as Slice C. `clippy -D warnings` clean,
+  `cargo test` green; cairn-accept Slice B.
+
+### Slice C — interactive convenience (separate slice, sketch only)
+> Lands *after* B, gated on B6's findings. Goal: auto-launch the browser so a freshly added
+> `.mcp.json` OAuth server works without a prior `toonfmt login`. Two candidate channels; build the
+> viable one(s), discard the rest. Reuses the **same B3 driver** — only the trigger and the
+> user-prompt channel differ. Splitting C out keeps B a complete, deterministic landing slice that
+> the three-way (explicit/stderr/elicitation) exploration can't block.
+- [ ] **C1 — stderr-inline (mcp-remote model).** Serve path with `HttpAuth::OAuth` + no stored
+  token, behind an explicit opt-in (`--oauth-interactive`): call the B3 driver with
+  `browser = open::that`, prompt to **stderr**, complete auth *before* `initialize`. e2e with the
+  test browser closure. **Keep iff** B6 showed Claude Code waits on `initialize` *and* surfaces
+  stderr; else discard.
+- [ ] **C2 — elicitation spike.** Investigate prompting the user *through Claude Code* via MCP
+  `elicitation/create` instead of stderr. **Two unknowns to settle first (spike, don't build):**
+  (1) does Claude Code honor elicitation from a *stdio* server at all? (docs unconfirmed);
+  (2) can it fire in time — elicitation is a server→client request presuming an initialized session,
+  but rmcp needs auth *before* `initialize`. If elicitation needs a live session, the only fit is a
+  **lazy** model (let `initialize` succeed, 401 on first `tools/call`, then elicit + auth) — which
+  means driving OAuth **outside** rmcp's `AuthClient` (reopens protocol rmcp otherwise owns). Spike
+  answers both before any build; if either is "no," drop C2. If both "yes," C2 supersedes C1.
+- [ ] **C3 — docs + accept.** Record the keep/discard verdict for each channel in `ARCHITECTURE.md`
+  + memory; cairn-accept Slice C.
 
 <!-- VERIFICATION TARGETS the user will supply when ready (do not invent / hardcode):
   1. Databricks SQL MCP (token auth) — primary, Slice A (A6).
