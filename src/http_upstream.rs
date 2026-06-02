@@ -25,25 +25,24 @@ use tokio::sync::mpsc;
 use rmcp::RoleClient;
 use rmcp::model::{ClientJsonRpcMessage, JsonRpcMessage};
 use rmcp::transport::Transport;
-use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 
-use crate::cli::HttpUpstream;
 use crate::jsonrpc::{Message, RequestTracker, classify};
 use crate::proxy::transform_downstream;
 
-/// Drive the HTTP upstream until the client's stdin closes or the upstream ends.
+/// Drive an already-constructed rmcp client transport until the client's stdin
+/// closes or the upstream ends.
 ///
-/// `bearer` is the already-resolved token (the CLI resolved `--bearer-env` with
-/// fail-fast semantics before we got here), set as `Authorization: Bearer` on
-/// every request by rmcp's transport.
-pub async fn run(upstream: HttpUpstream, bearer: Option<String>) -> Result<()> {
-    let mut config = StreamableHttpClientTransportConfig::with_uri(upstream.url.clone());
-    if let Some(token) = bearer {
-        config = config.auth_header(token);
-    }
-    let mut transport = StreamableHttpClientTransport::from_config(config);
-
+/// **Generic over the transport** (`T: Transport<RoleClient>`) because the auth
+/// mode determines the concrete type: the bearer/no-auth path is a
+/// `StreamableHttpClientTransport<reqwest::Client>` (built via `from_config`), while
+/// the OAuth path is a `StreamableHttpClientTransport<AuthClient<reqwest::Client>>`
+/// (built via `with_client`). They are different concrete types, unified only by
+/// this trait — so auth selection is a **construction-time** branch in `main`, and
+/// this loop never sees it. The loop uses only `send`/`receive`/`close`.
+pub async fn run<T>(mut transport: T) -> Result<()>
+where
+    T: Transport<RoleClient>,
+{
     // Correlate request ids to methods so the downstream decision knows whether a
     // response is a `tools/call`. On the HTTP leg the correlation is still causal
     // (we record on the way out, consume on the way in), so the tracker is reused

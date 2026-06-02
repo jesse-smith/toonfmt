@@ -422,7 +422,7 @@ locally** unless the transport's async send/receive ordering forces correlation.
   localhost callback listener, build `redirect_uri`, run discovery→register→authorize (invoke an
   **injected** `browser: impl Fn(&str) -> Result<()>`)→await callback→`handle_callback`→
   `into_authorization_manager()`; persist via the B2 store. Returns an `AuthorizationManager`.
-- [ ] **B4 — `toonfmt login` + serve-path OAuth wiring.** `login` calls B3 with
+- [x] **B4 — `toonfmt login` + serve-path OAuth wiring.** `login` calls B3 with
   `browser = open::that`, persists tokens, prints success to **stderr**. Serve path with
   `HttpAuth::OAuth`: **load** from the B2 store → `AuthClient::new(reqwest, am)` → `with_client(...)`
   → generic `run`. No stored token → **fail fast** to stderr ("run `toonfmt login <url>` first"); the

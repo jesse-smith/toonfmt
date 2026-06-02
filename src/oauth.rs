@@ -20,13 +20,9 @@
 //! serve path (B4) rebuilds a manager with our store wired in, so rmcp's auto-refresh
 //! then persists rotated tokens through it.
 
-// The driver is exercised by its unit tests (and the B5 e2e), but the *binary*
-// doesn't call `login` until B4 wires the `login` subcommand. B4 removes this allow.
-#![allow(dead_code)]
-
 use anyhow::{Context, Result, anyhow, bail};
-use rmcp::transport::{CredentialStore, StoredCredentials};
 use rmcp::transport::auth::OAuthState;
+use rmcp::transport::{AuthClient, AuthorizationManager, CredentialStore, StoredCredentials};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -117,6 +113,40 @@ where
         .map_err(|e| anyhow!("persisting credentials: {e}"))?;
 
     Ok(credentials)
+}
+
+/// Build an [`AuthClient`] for the **serve** path from previously-persisted
+/// credentials, ready to hand to `StreamableHttpClientTransport::with_client`.
+///
+/// Unlike [`login`], this builds an [`AuthorizationManager`] **with our store wired
+/// in** (`set_credential_store`) and then `initialize_from_store()`. Wiring the store
+/// matters beyond the initial load: rmcp's automatic token refresh writes the
+/// rotated token back through `save()`, so a refresh during a long-lived serve
+/// session persists to disk and survives the next restart.
+///
+/// Fails fast (the caller surfaces it to stderr) when no usable token is stored —
+/// the serve path **never** launches a browser, which is the property that keeps
+/// `initialize` non-blocking and lets Slice B stand alone.
+pub async fn serve_auth_client<S>(url: &str, store: S) -> Result<AuthClient<reqwest::Client>>
+where
+    S: CredentialStore + 'static,
+{
+    let mut manager = AuthorizationManager::new(url)
+        .await
+        .map_err(|e| anyhow!("initializing OAuth manager for {url}: {e}"))?;
+    manager.set_credential_store(store);
+
+    let loaded = manager
+        .initialize_from_store()
+        .await
+        .map_err(|e| anyhow!("loading stored OAuth credentials: {e}"))?;
+    if !loaded {
+        bail!(
+            "no stored OAuth credentials for {url}; run `toonfmt login --http {url}` first"
+        );
+    }
+
+    Ok(AuthClient::new(reqwest::Client::default(), manager))
 }
 
 /// Accept exactly one HTTP request on the loopback listener, parse the OAuth

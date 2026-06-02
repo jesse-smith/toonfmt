@@ -17,11 +17,6 @@
 //! tests drive a throwaway path; [`FileCredentialStore::for_url`] resolves the
 //! production `~/.toonfmt-auth/` from `$HOME`.
 
-// The store is fully exercised by its unit tests, but nothing in the *binary* wires
-// it in until B4 (`login` + the OAuth serve path). Until then the non-test build
-// sees the API as unused. B4 removes this allow.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};

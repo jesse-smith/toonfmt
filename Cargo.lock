@@ -1569,6 +1569,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "json5",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",
