@@ -406,7 +406,7 @@ locally** unless the transport's async send/receive ordering forces correlation.
 
 - [x] **B0 — verify Slice A landed first.** Slice B does not start until A is at
   `cairn-accept` with the real-MCP check (A6) done. Hard dependency. **(done — A landed `bed3bc5`.)**
-- [ ] **B1 — Cargo `auth` feature + CLI command split.** Add `auth` to `rmcp` features; build clean.
+- [x] **B1 — Cargo `auth` feature + CLI command split.** Add `auth` to `rmcp` features; build clean.
   Restructure `src/cli.rs`: `Command::{Serve, Login}`, `HttpAuth { None, Bearer{env}, OAuth }`; add
   `--oauth` (serve) and the `login` grammar (`toonfmt login --http <url>`). Red-green parser tests
   (oauth/bearer mutual exclusion, `login` parse, dangling flags, existing stdio/bearer tests still

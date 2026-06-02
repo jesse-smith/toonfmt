@@ -1,14 +1,18 @@
 //! Command-line argument parsing.
 //!
-//! Two upstream shapes:
-//!   - **stdio** (the original): `[flags] -- <program> <args...>` — everything
-//!     after `--` is the command toonfmt spawns and pumps over its pipes.
-//!   - **HTTP** (this phase): `--http <url> [--bearer-env <VAR>]` — toonfmt
-//!     connects to a Streamable HTTP MCP server instead of spawning a child.
+//! Two top-level commands:
+//!   - **serve** (the default, no subcommand): run the proxy. Selects one upstream
+//!     shape — **stdio** (`[flags] -- <program> <args...>`) or **HTTP**
+//!     (`--http <url> [--bearer-env <VAR>] [--oauth]`).
+//!   - **login** (`login --http <url>`): run the OAuth authorization-code flow for
+//!     an HTTP upstream once, persist the tokens, and exit. The serve path then
+//!     loads those tokens — it never launches a browser, so `initialize` is never
+//!     blocked on a human.
 //!
-//! Exactly one shape must be selected: `--http` and `--` are mutually exclusive,
-//! and at least one is required. Flags other than `--http`/`--bearer-env` before
-//! `--` remain reserved for later phases and are ignored.
+//! For the serve/HTTP shape, exactly one auth selector may be given:
+//! `--bearer-env` and `--oauth` are mutually exclusive (static token vs.
+//! authorization-code grant). `--http` and `--` are mutually exclusive, and one is
+//! required.
 
 use anyhow::{Result, bail};
 
@@ -19,34 +23,45 @@ pub struct UpstreamCmd {
     pub args: Vec<String>,
 }
 
-/// An HTTP (Streamable HTTP) MCP upstream. `bearer_env` is the *name* of an
-/// environment variable holding the bearer token — never the token itself, and
-/// never read from argv (which would leak it into the process list). Resolution
-/// to the actual token happens at startup via [`HttpUpstream::resolve_bearer`],
-/// with fail-fast semantics. Shaped to let Slice B add OAuth selectors without
-/// re-touching the [`Upstream`] enum.
+/// How an HTTP upstream authenticates. Bearer-vs-OAuth is mutually exclusive at the
+/// type level (a value is exactly one of these), which is why the auth selector
+/// lives here rather than as independent `Option` fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpAuth {
+    /// No auth header (public upstream).
+    None,
+    /// Static bearer token, resolved at startup from the named env var (never the
+    /// token on argv). `env` is the *variable name*.
+    Bearer { env: String },
+    /// OAuth 2.1 authorization-code grant. The token is obtained out-of-band by
+    /// `toonfmt login` and loaded from the credential store at serve time.
+    OAuth,
+}
+
+/// An HTTP (Streamable HTTP) MCP upstream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpUpstream {
     pub url: String,
-    pub bearer_env: Option<String>,
+    pub auth: HttpAuth,
 }
 
 impl HttpUpstream {
-    /// Resolve the bearer token from the named env var, fail-fast.
+    /// Resolve the bearer token, fail-fast — meaningful only for [`HttpAuth::Bearer`].
     ///
-    /// - `bearer_env: None` → `Ok(None)` (no auth header).
-    /// - `bearer_env: Some(var)` and the var is set → `Ok(Some(token))`.
-    /// - `bearer_env: Some(var)` and the var is unset/empty → **error**. A
-    ///   misspelled or unset var must not silently degrade to an unauthenticated
-    ///   request (which would surface as a confusing upstream 401); it stops here.
+    /// - [`HttpAuth::None`] / [`HttpAuth::OAuth`] → `Ok(None)` (the OAuth token is
+    ///   loaded from the credential store on the serve path, not here).
+    /// - [`HttpAuth::Bearer`] and the var is set non-empty → `Ok(Some(token))`.
+    /// - [`HttpAuth::Bearer`] and the var is unset/empty → **error**. A misspelled
+    ///   or unset var must not silently degrade to an unauthenticated request
+    ///   (which would surface as a confusing upstream 401); it stops here.
     pub fn resolve_bearer(&self) -> Result<Option<String>> {
-        let Some(var) = self.bearer_env.as_deref() else {
+        let HttpAuth::Bearer { env } = &self.auth else {
             return Ok(None);
         };
-        match std::env::var(var) {
+        match std::env::var(env) {
             Ok(token) if !token.is_empty() => Ok(Some(token)),
-            Ok(_) => bail!("--bearer-env {var}: environment variable is set but empty"),
-            Err(_) => bail!("--bearer-env {var}: environment variable is not set"),
+            Ok(_) => bail!("--bearer-env {env}: environment variable is set but empty"),
+            Err(_) => bail!("--bearer-env {env}: environment variable is not set"),
         }
     }
 }
@@ -58,17 +73,69 @@ pub enum Upstream {
     Http(HttpUpstream),
 }
 
-/// Parse arguments into an [`Upstream`].
+/// Arguments for the `login` subcommand: run the OAuth flow for an HTTP upstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginArgs {
+    pub url: String,
+}
+
+/// Top-level command. `serve` is the default (no subcommand); `login` runs the
+/// one-shot OAuth flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
+    Serve(Upstream),
+    Login(LoginArgs),
+}
+
+/// Parse process arguments (excluding argv[0]) into a [`Command`].
 ///
-/// `args` should be the process arguments *excluding* argv[0]. Selection:
-///   - `--http <url>` (optionally `--bearer-env <VAR>`) → [`Upstream::Http`].
-///   - `-- <program> [args...]` → [`Upstream::Stdio`].
+/// Grammar:
+///   - `login --http <url>` → [`Command::Login`].
+///   - `--http <url> [--bearer-env <VAR> | --oauth]` → [`Command::Serve`] HTTP.
+///   - `-- <program> [args...]` → [`Command::Serve`] stdio.
 ///
-/// Errors if both shapes are given (ambiguous), if neither is given, or if a
-/// flag is missing its value.
-pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Upstream> {
+/// Errors on: both upstream shapes, neither shape, a flag missing its value, both
+/// auth selectors together, or auth flags applied to the stdio form.
+pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Command> {
+    let mut it = args.peekable();
+
+    // `login` subcommand: distinguished by the first token. Everything else is the
+    // implicit `serve` command.
+    if it.peek().map(String::as_str) == Some("login") {
+        it.next(); // consume `login`
+        return parse_login(it).map(Command::Login);
+    }
+
+    parse_serve(it).map(Command::Serve)
+}
+
+/// Parse `login --http <url>`. Only `--http` is accepted — login *is* the OAuth
+/// flow, so no auth selector is needed (or allowed).
+fn parse_login(args: impl Iterator<Item = String>) -> Result<LoginArgs> {
+    let mut url: Option<String> = None;
+    let mut it = args;
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--http" => {
+                let Some(u) = it.next() else {
+                    bail!("login --http requires a URL argument");
+                };
+                url = Some(u);
+            }
+            other => bail!("unexpected argument to `login`: {other} (usage: toonfmt login --http <url>)"),
+        }
+    }
+    match url {
+        Some(url) => Ok(LoginArgs { url }),
+        None => bail!("login requires an upstream; usage: toonfmt login --http <url>"),
+    }
+}
+
+/// Parse the serve forms (HTTP or stdio).
+fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
     let mut http_url: Option<String> = None;
     let mut bearer_env: Option<String> = None;
+    let mut oauth = false;
     let mut after_sep: Option<Vec<String>> = None;
 
     let mut it = args;
@@ -92,6 +159,7 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Upstream> {
                 };
                 bearer_env = Some(var);
             }
+            "--oauth" => oauth = true,
             // Other pre-`--` tokens are reserved for later-phase flags; ignore.
             _ => {}
         }
@@ -101,10 +169,23 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Upstream> {
         (Some(_), Some(_)) => {
             bail!("ambiguous: pass either `--http <url>` or `-- <program>`, not both")
         }
-        (Some(url), None) => Ok(Upstream::Http(HttpUpstream { url, bearer_env })),
+        (Some(url), None) => {
+            let auth = match (bearer_env, oauth) {
+                (Some(_), true) => {
+                    bail!("--bearer-env and --oauth are mutually exclusive (pick one auth mode)")
+                }
+                (Some(env), false) => HttpAuth::Bearer { env },
+                (None, true) => HttpAuth::OAuth,
+                (None, false) => HttpAuth::None,
+            };
+            Ok(Upstream::Http(HttpUpstream { url, auth }))
+        }
         (None, Some(after)) => {
             if bearer_env.is_some() {
                 bail!("--bearer-env applies to `--http` upstreams, not the stdio `--` form");
+            }
+            if oauth {
+                bail!("--oauth applies to `--http` upstreams, not the stdio `--` form");
             }
             let mut after = after.into_iter();
             let Some(program) = after.next() else {
@@ -118,7 +199,7 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Upstream> {
             }))
         }
         (None, None) => bail!(
-            "no upstream selected; usage: toonfmt --http <url> [--bearer-env VAR] | toonfmt -- <program> [args...]"
+            "no upstream selected; usage: toonfmt --http <url> [--bearer-env VAR | --oauth] | toonfmt -- <program> [args...]"
         ),
     }
 }
@@ -127,25 +208,32 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Upstream> {
 mod tests {
     use super::*;
 
-    fn parse(tokens: &[&str]) -> Result<Upstream> {
+    fn parse(tokens: &[&str]) -> Result<Command> {
         parse_args(tokens.iter().map(|s| s.to_string()))
     }
 
-    fn stdio(tokens: &[&str]) -> UpstreamCmd {
+    fn serve(tokens: &[&str]) -> Upstream {
         match parse(tokens).unwrap() {
+            Command::Serve(u) => u,
+            other => panic!("expected Serve, got {other:?}"),
+        }
+    }
+
+    fn stdio(tokens: &[&str]) -> UpstreamCmd {
+        match serve(tokens) {
             Upstream::Stdio(cmd) => cmd,
             other => panic!("expected Stdio, got {other:?}"),
         }
     }
 
     fn http(tokens: &[&str]) -> HttpUpstream {
-        match parse(tokens).unwrap() {
+        match serve(tokens) {
             Upstream::Http(h) => h,
             other => panic!("expected Http, got {other:?}"),
         }
     }
 
-    // --- stdio shape (the original 5 tests, adapted to the enum) ---
+    // --- stdio shape (the original tests, adapted to Command) ---
 
     #[test]
     fn well_formed_program_and_args() {
@@ -179,31 +267,53 @@ mod tests {
         assert!(parse(&["--"]).is_err());
     }
 
-    // --- HTTP shape (A2: tests a–f) ---
+    // --- HTTP shape ---
 
-    /// (a) `--http <url>` → Http with no bearer env.
+    /// `--http <url>` → Http with no auth.
     #[test]
     fn http_url_only() {
         let h = http(&["--http", "https://x.example/mcp"]);
         assert_eq!(h.url, "https://x.example/mcp");
-        assert_eq!(h.bearer_env, None);
+        assert_eq!(h.auth, HttpAuth::None);
     }
 
-    /// (b) `--http <url> --bearer-env TOK` → bearer_env captured (the var name).
+    /// `--http <url> --bearer-env TOK` → Bearer auth with the var name.
     #[test]
     fn http_url_with_bearer_env() {
         let h = http(&["--http", "https://x.example/mcp", "--bearer-env", "TOK"]);
         assert_eq!(h.url, "https://x.example/mcp");
-        assert_eq!(h.bearer_env, Some("TOK".to_string()));
+        assert_eq!(h.auth, HttpAuth::Bearer { env: "TOK".to_string() });
     }
 
-    /// (d) `--http <url> -- cat` → ambiguous → error.
+    /// `--http <url> --oauth` → OAuth auth mode.
+    #[test]
+    fn http_url_with_oauth() {
+        let h = http(&["--http", "https://x.example/mcp", "--oauth"]);
+        assert_eq!(h.url, "https://x.example/mcp");
+        assert_eq!(h.auth, HttpAuth::OAuth);
+    }
+
+    /// `--bearer-env` and `--oauth` together → error (mutually exclusive).
+    #[test]
+    fn bearer_and_oauth_mutually_exclusive() {
+        assert!(parse(&["--http", "https://x", "--bearer-env", "TOK", "--oauth"]).is_err());
+        // Order-independent.
+        assert!(parse(&["--http", "https://x", "--oauth", "--bearer-env", "TOK"]).is_err());
+    }
+
+    /// `--oauth` on the stdio form → error.
+    #[test]
+    fn oauth_on_stdio_errors() {
+        assert!(parse(&["--oauth", "--", "cat"]).is_err());
+    }
+
+    /// `--http <url> -- cat` → ambiguous → error.
     #[test]
     fn http_and_stdio_is_ambiguous() {
         assert!(parse(&["--http", "https://x.example/mcp", "--", "cat"]).is_err());
     }
 
-    /// (e) neither shape → error.
+    /// Neither shape → error.
     #[test]
     fn neither_shape_errors() {
         assert!(parse(&[]).is_err());
@@ -217,14 +327,41 @@ mod tests {
         assert!(parse(&["--http", "https://x", "--bearer-env"]).is_err());
     }
 
-    /// (f) bearer resolution is fail-fast: var present → token; absent/empty → error.
-    /// Uses a process-unique var name so the test is independent of the environment.
+    // --- login subcommand ---
+
+    /// `login --http <url>` → Login with the URL.
+    #[test]
+    fn login_well_formed() {
+        match parse(&["login", "--http", "https://x.example/mcp"]).unwrap() {
+            Command::Login(LoginArgs { url }) => assert_eq!(url, "https://x.example/mcp"),
+            other => panic!("expected Login, got {other:?}"),
+        }
+    }
+
+    /// `login` with no URL → error.
+    #[test]
+    fn login_requires_url() {
+        assert!(parse(&["login"]).is_err());
+        assert!(parse(&["login", "--http"]).is_err());
+    }
+
+    /// `login` rejects stray arguments (it's OAuth-only — no `--bearer-env`).
+    #[test]
+    fn login_rejects_stray_args() {
+        assert!(parse(&["login", "--http", "https://x", "--bearer-env", "TOK"]).is_err());
+        assert!(parse(&["login", "--", "cat"]).is_err());
+    }
+
+    // --- bearer resolution (fail-fast), now driven by HttpAuth ---
+
+    /// Bearer resolution is fail-fast: var present → token; absent/empty → error;
+    /// non-bearer auth modes → Ok(None). Uses a process-unique var name.
     #[test]
     fn bearer_env_resolves_fail_fast() {
-        let var = "TOONFMT_TEST_BEARER_A2";
+        let var = "TOONFMT_TEST_BEARER_B1";
         let h = HttpUpstream {
             url: "https://x.example/mcp".to_string(),
-            bearer_env: Some(var.to_string()),
+            auth: HttpAuth::Bearer { env: var.to_string() },
         };
 
         // Absent → error.
@@ -239,12 +376,20 @@ mod tests {
         unsafe { std::env::set_var(var, "secret-token") };
         assert_eq!(h.resolve_bearer().unwrap(), Some("secret-token".to_string()));
 
-        // No bearer_env → Ok(None), no auth.
         unsafe { std::env::remove_var(var) };
+
+        // No auth → Ok(None).
         let none = HttpUpstream {
             url: "https://x.example/mcp".to_string(),
-            bearer_env: None,
+            auth: HttpAuth::None,
         };
         assert_eq!(none.resolve_bearer().unwrap(), None);
+
+        // OAuth → Ok(None) here (token loaded from the store on the serve path).
+        let oauth = HttpUpstream {
+            url: "https://x.example/mcp".to_string(),
+            auth: HttpAuth::OAuth,
+        };
+        assert_eq!(oauth.resolve_bearer().unwrap(), None);
     }
 }
