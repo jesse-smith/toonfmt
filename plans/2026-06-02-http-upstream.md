@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-02  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-05-28-toon-transform.md (Phase 2 — transform, landed)
-**Status:** drafted  <!-- drafted | in progress | landed -->
+**Status:** in progress  <!-- drafted | in progress | landed -->
 
 ## Goal
 toonfmt is stdio↔stdio today: it spawns an upstream child and pumps JSON-RPC over its
@@ -168,7 +168,7 @@ locally** unless the transport's async send/receive ordering forces correlation.
   payloads before committing to rmcp. **It is not the architectural fallback**: the whole point
   of this phase is to *eliminate* the Node/npx dependency, so "ship the mcp-remote wrapper" is a
   non-goal. The real fallback if A1 fails is the hand-rolled `reqwest` + `sse-stream` driver.
-- [ ] **A1 — SPIKE: characterize the `Value`↔rmcp boundary; produce the per-method routing map.**
+- [x] **A1 — SPIKE: characterize the `Value`↔rmcp boundary; produce the per-method routing map.**
   (Reframed — see the LOAD-BEARING CHECK note. "Can we drive Transport raw?" is already YES; the
   spike maps which methods go **typed** vs. **`Custom`**, it does not pass/fail the whole rmcp
   path.) Add the `rmcp` dep with the candidate features; `cargo build` clean. Write `#[ignore]`d
@@ -206,7 +206,7 @@ locally** unless the transport's async send/receive ordering forces correlation.
   silent unauthenticated request (a misspelled var must not degrade to confusing upstream 401s).
   Add test (f): `bearer_env: Some` + var present → token resolved; var absent → startup error.
   (CLI is shaped now so Slice B adds `--oauth`-style flags without re-touching the enum.)
-- [ ] **A3 — HTTP MCP stub fixture (`tests/fixtures/http_mcp_stub.py`).** Zero-dep stdlib
+- [x] **A3 — HTTP MCP stub fixture (`tests/fixtures/http_mcp_stub.py`).** Zero-dep stdlib
   Streamable HTTP MCP server (sibling to `json_mcp_stub.py`). Handles POST at one endpoint:
   `initialize` (assigns an `Mcp-Session-Id`), `tools/list`, and `tools/call` for three probes:
   `probe_content_only` (JSON-object content string → `application/json` response);
@@ -318,6 +318,44 @@ locally** unless the transport's async send/receive ordering forces correlation.
      to test buffer-until-complete-block on a real server.
   3. An MCP that uses OAuth — Slice B (B3).
 -->
+
+<!-- ============================================================================
+  A1 RESULT — rmcp boundary routing map (MEASURED 2026-06-02, rmcp 1.7.0).
+  Source: tests/rmcp_spike.rs. Pure-serde probes (always-on) + one #[ignore]d
+  live-transport probe against the A3 stub. VERDICT: VIABLE — let rmcp's
+  `from_value` auto-select the typed-or-Custom variant; no hand-rolled fallback.
+
+  Per-method routing (verdict = what rmcp's typed layer does to the Value):
+  | Method                       | Direction          | Verdict                                  |
+  |------------------------------|--------------------|------------------------------------------|
+  | initialize                   | client→server req  | Faithful (typed)                         |
+  | notifications/initialized    | client→server noti | Faithful (typed)                         |
+  | tools/call                   | client→server req  | Faithful (typed)                         |
+  | tools/list                   | client→server req  | Reshapes: adds `params:{}` (inert*)      |
+  | x/bogus (unknown)            | client→server req  | Faithful via CustomRequest (method+params kept) |
+  | **tools/call RESULT**        | server→client      | **Faithful (typed CallToolResult)** ⟵ the payload we transform |
+  | tools/list result            | server→client      | Faithful (typed)                         |
+  | sampling/createMessage       | server→client req  | Faithful (representable; Custom path)    |
+
+  * tools/list gaining `params:{}` on the OUTBOUND request is semantically inert
+    (an absent optional params vs an empty object; servers treat them alike). It is
+    NOT on the transform path. Recorded for honesty; needs no special handling.
+
+  KEY FACTS for A4:
+  - rmcp's `receive()` has ALREADY forced typed deserialization before we see a
+    message (ServerJsonRpcMessage is the receive type) — so inbound routing is not
+    our choice; we measure it, and it's faithful for tools/call results.
+  - CallToolResult deserialize (model.rs:2794) requires ≥1 known field (so it won't
+    shadow CustomResult in the untagged enum) and DEFAULTS content to `[]` when
+    absent; serializes with skip_serializing_if on structuredContent/isError/_meta.
+    The content[].text JSON-string survives VERBATIM (live-wire confirmed).
+  - Unknown methods (both directions) hit Custom* (method+params preserved) — never
+    rejected. So A4 needs NO method allow-list; lift every Value via from_value and
+    rmcp picks typed-or-Custom. A4's only routing decision is the EXISTING one:
+    "is this a correlated tools/call response?" → transform; else passthrough.
+  - Construction-time worker drives send/receive with NO serve_client (live test
+    passed). Handshake order initialize → (worker blocks) → initialized confirmed.
+============================================================================ -->
 
 ## Open questions (resolve in plan-mode fleshing or as encountered)
 - **A1 produces the per-method routing map (not a go/no-go on rmcp).** Raw transport drivability
