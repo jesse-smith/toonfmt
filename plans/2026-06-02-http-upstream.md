@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-02  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-05-28-toon-transform.md (Phase 2 — transform, landed)
-**Status:** Slice A landed (2026-06-02) · Slice B (explicit OAuth) drafted, in progress · Slice C (interactive OAuth) deferred  <!-- drafted | in progress | landed -->
+**Status:** Slice A landed (2026-06-02) · Slice B (explicit OAuth) landed (2026-06-02) · Slice C (interactive OAuth) deferred  <!-- drafted | in progress | landed -->
 
 ## Goal
 toonfmt is stdio↔stdio today: it spawns an upstream child and pumps JSON-RPC over its
@@ -455,10 +455,15 @@ locally** unless the transport's async send/receive ordering forces correlation.
   serve `--http <url>` (logging in with the bare host but serving `…/mcp` → different hash →
   fail-fast "disconnected"). Candidate polish: `login` prints the exact `--http` value and/or
   canonicalizes the URL before hashing.
-- [ ] **B7 — Docs + cairn-verify/accept (Slice B).** `ARCHITECTURE.md`: OAuth moves from "next
-  slice" to **supported (explicit `login`)**; document the `login` subcommand, `--oauth`, token
-  storage (`~/.toonfmt-auth/`). Note interactive auto-browser as Slice C. `clippy -D warnings` clean,
-  `cargo test` green; cairn-accept Slice B.
+- [x] **B7 — Docs + cairn-verify/accept (Slice B).** `ARCHITECTURE.md` updated: OAuth moved from
+  "next slice" to **supported (explicit `login`)** in all three sites — the `.mcp.json` intro example
+  (added an `oauth-svc` row), the Config surface section (new **OAuth (landed)** block documenting the
+  `login` subcommand, `--oauth` serve flag, token storage `~/.toonfmt-auth/<sha256(url)>.json`
+  `0600`/`0700`, the **URL-match gotcha**, the topology reason toonfmt drives OAuth itself, and
+  interactive auto-browser noted as Slice C), and the Phase-3 Scope note (Slice B landed 2026-06-02,
+  stub e2e + live Cloudflare server). `--bearer-env`/`--oauth` documented as mutually exclusive.
+  Gates: `cargo clippy --all-targets -- -D warnings` clean, `cargo test` green (71 passed). Docs-only —
+  no code change. cairn-accept Slice B (Status flipped to landed).
 
 ### Slice C — interactive convenience (separate slice, sketch only)
 > Lands *after* B, gated on B6's findings. Goal: auto-launch the browser so a freshly added

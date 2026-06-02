@@ -14,6 +14,10 @@ A transparent MCP proxy that wraps an existing server and converts JSON tool-res
     "remote-sql": {                           // HTTP upstream: --http <url> [--bearer-env VAR]
       "command": "toonfmt",
       "args": ["--http", "https://host/mcp", "--bearer-env", "REMOTE_SQL_TOKEN"]
+    },
+    "oauth-svc": {                            // HTTP upstream, OAuth: run `toonfmt login --http <url>` once first
+      "command": "toonfmt",                   //   (the --http URL must byte-match the login URL)
+      "args": ["--http", "https://host/mcp", "--oauth"]
     }
   }
 }
@@ -93,11 +97,22 @@ If a non-strict path is taken, **log it** (which upstream server, which tool) so
 
 ## Config surface
 
+**Commands.** The binary has two subcommands: the default **serve** form (an implicit `toonfmt [serve-flags]`, what `.mcp.json` invokes) and **`toonfmt login --http <url>`** (a one-shot OAuth authorization, run by hand before serving — see OAuth below).
+
 **Upstream selection (landed):**
 
 - `--  <program> [args...]` — stdio upstream (spawn and pump over pipes). Mutually exclusive with `--http`.
 - `--http <url>` — HTTP (Streamable HTTP) upstream. Mutually exclusive with `--`; exactly one is required.
-- `--bearer-env <VAR>` — name of an env var holding the bearer token for an HTTP upstream (never the token on argv — no process-list leak). Resolved at startup with **fail-fast** semantics: unset or empty → error and exit (no silent degrade to an unauthenticated request). Absent → no auth header. OAuth is the **next slice** (rmcp's additive `auth` feature on this same transport).
+- `--bearer-env <VAR>` — name of an env var holding the bearer token for an HTTP upstream (never the token on argv — no process-list leak). Resolved at startup with **fail-fast** semantics: unset or empty → error and exit (no silent degrade to an unauthenticated request). Absent → no auth header. Mutually exclusive with `--oauth` (a server takes a static token *or* an OAuth grant, not both).
+
+**OAuth (landed — explicit `login`):** for HTTP upstreams that require an OAuth 2.1 authorization-code grant rather than a static token. rmcp's additive `auth` feature owns the *protocol* (metadata discovery, dynamic client registration, PKCE, code↔token exchange, automatic token refresh); toonfmt owns the *lifecycle/UX* (browser launch, the localhost redirect listener, persistent cross-process token storage).
+
+- `toonfmt login --http <url>` — run **once, by hand**, before serving. Discovers the server's OAuth metadata, opens the system browser to the consent page (binds an ephemeral `127.0.0.1:<port>/callback` listener for the redirect), completes the code↔token exchange, and **persists** the credentials to disk. Prints success to stderr and exits. (`TOONFMT_BROWSER_CMD` overrides the launcher — the seam the headless e2e drives.)
+- `--oauth` (serve flag) — selects the OAuth transport. The serve path only ever **loads** the cached token (then lets rmcp auto-refresh + re-persist rotated tokens); it **never launches a browser**. No stored token → **fail-fast** to stderr (`run \`toonfmt login --http <url>\` first`). This is the property that lets the feature stand alone: serve never blocks `initialize` on a human.
+- **Token storage:** `~/.toonfmt-auth/<sha256(url)>.json`, file `0600` / dir `0700`, one file per upstream URL (holds rmcp's `StoredCredentials`). Simple, inspectable, cross-process — the `mcp-remote` model.
+- **⚠️ URL-match gotcha (MEASURED in B6):** the store is keyed by the **exact upstream URL string**, so the `login --http <url>` URL must **byte-match** the serve `--http <url>` in `.mcp.json`. Logging in with the bare host (`https://host`) but serving `https://host/mcp` stores the token under a different hash → serve fail-fast → the host shows only "disconnected". Use the identical string in both places.
+- **Why toonfmt drives OAuth itself:** to the host (Claude Code), toonfmt is a *stdio subprocess*; the host's native OAuth/reauth flow fires only for servers *it* connects to over HTTP/SSE, and is blind to a stdio subprocess's upstream backend. The OAuth-protected server is on toonfmt's *upstream* leg, so toonfmt drives the browser flow itself (the same reason `mcp-remote` exists).
+- **Interactive auto-browser is deferred to Slice C** — auto-launching the browser at serve time (so a freshly added `.mcp.json` OAuth server works with no prior `login`). It's gated on host behavior toonfmt doesn't control (whether the host waits on a slow `initialize` and where it surfaces stderr). Explicit `login` is deterministic and host-independent, so it ships alone.
 
 **Transform flags (Phase 4 — design-only):**
 
@@ -120,5 +135,5 @@ If a non-strict path is taken, **log it** (which upstream server, which tool) so
 ## Scope notes
 
 - Tools-only by default. Don’t convert `resources/read` — resources carry markdown/prose that conversion would corrupt.
-- Built incrementally, not one-shot. **Phase 1** (JSON-RPC passthrough pump) and **Phase 2** (`tools/call` result JSON→TOON transform, equality-gated `structuredContent` strip) are landed and live-verified against Claude Code. **Phase 3** (HTTP upstream — Streamable HTTP via rmcp, `--http`/`--bearer-env` with fail-fast bearer auth) — **Slice A landed (2026-06-02)**, verified end-to-end against the stub e2e **and two live servers** (Databricks SQL with token auth; Parallel Web Search no-auth) — real `tools/call` results return TOON'd, data faithful, bearer on the wire, in-flight responses drained on stdin EOF. One accepted known limitation: real-SSE buffer-until-complete is stub-covered only (both live targets answered `application/json`; on the rmcp path SSE assembly is rmcp's, so fragment-transform is structurally impossible). **OAuth (Slice B) is the remaining work** — the next slice: rmcp's additive `auth` feature on this same transport. **Phase 4** — the transform config surface (`--skip-tool`, `--strictness {strict|json5}`, `--structured-content {keep|strip|minify}`) and the structured-only "add a content block" case (2a) — remains design-only. This doc is the constitution; the hardcoded transform defaults are strictness=json5, structured-content=equality-gated strip, no skip list.
+- Built incrementally, not one-shot. **Phase 1** (JSON-RPC passthrough pump) and **Phase 2** (`tools/call` result JSON→TOON transform, equality-gated `structuredContent` strip) are landed and live-verified against Claude Code. **Phase 3** (HTTP upstream — Streamable HTTP via rmcp, `--http`/`--bearer-env` with fail-fast bearer auth) — **Slice A landed (2026-06-02)**, verified end-to-end against the stub e2e **and two live servers** (Databricks SQL with token auth; Parallel Web Search no-auth) — real `tools/call` results return TOON'd, data faithful, bearer on the wire, in-flight responses drained on stdin EOF. One accepted known limitation: real-SSE buffer-until-complete is stub-covered only (both live targets answered `application/json`; on the rmcp path SSE assembly is rmcp's, so fragment-transform is structurally impossible). **Slice B (OAuth — explicit `login`) landed (2026-06-02)**: rmcp's additive `auth` feature drives an OAuth 2.1 authorization-code grant; `toonfmt login --http <url>` persists credentials to `~/.toonfmt-auth/`, and `--oauth` serve loads + auto-refreshes them without ever blocking `initialize` on a browser. Verified by the headless stub e2e (`tests/oauth_e2e.rs` — login→persist→serve→TOON→reuse) **and a live OAuth server** (Cloudflare Workers bindings, `https://bindings.mcp.cloudflare.com/mcp`, in real Claude Code — connected, `tools/call` → TOON, refresh path exercised). Interactive auto-browser (Slice C) remains deferred. **Phase 4** — the transform config surface (`--skip-tool`, `--strictness {strict|json5}`, `--structured-content {keep|strip|minify}`) and the structured-only "add a content block" case (2a) — remains design-only. This doc is the constitution; the hardcoded transform defaults are strictness=json5, structured-content=equality-gated strip, no skip list.
 - **Out of scope:** emitting HTTP (the client leg is always stdio — toonfmt does not serve HTTP); the legacy HTTP+SSE two-endpoint transport (2024-11-05).
