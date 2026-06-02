@@ -411,7 +411,7 @@ locally** unless the transport's async send/receive ordering forces correlation.
   `--oauth` (serve) and the `login` grammar (`toonfmt login --http <url>`). Red-green parser tests
   (oauth/bearer mutual exclusion, `login` parse, dangling flags, existing stdio/bearer tests still
   pass). Update `main.rs` dispatch skeleton (`Login` arm may `todo!()` until B4).
-- [ ] **B2 — File `CredentialStore`.** New `src/credential_store.rs`: implement rmcp's
+- [x] **B2 — File `CredentialStore`.** New `src/credential_store.rs`: implement rmcp's
   `CredentialStore` (`async load/save/clear` over `StoredCredentials`) backed by
   `~/.toonfmt-auth/<url-hash>.json` at `0600`. Unit tests: save→load round-trip, `clear`, per-URL
   isolation (two URLs → two files), perms assertion, missing-file → `Ok(None)`.

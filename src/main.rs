@@ -4,6 +4,7 @@
 //! and pumps JSON-RPC both directions unchanged. The TOON transform lands later.
 
 mod cli;
+mod credential_store;
 mod http_upstream;
 mod jsonrpc;
 mod proxy;

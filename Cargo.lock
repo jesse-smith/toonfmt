@@ -1567,10 +1567,12 @@ name = "toonfmt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "json5",
  "rmcp",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "toon-format",
  "tracing",
