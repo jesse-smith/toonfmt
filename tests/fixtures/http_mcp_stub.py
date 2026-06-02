@@ -27,12 +27,30 @@ connects. Logs otherwise go to stderr; stdout carries only the port line.
 """
 
 import json
+import os
 import sys
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 PROTOCOL_VERSION = "2025-03-26"
+
+# --- OAuth mode (opt-in via env, so the bearer/no-auth tests are untouched) -------
+# When TOONFMT_STUB_OAUTH=1, the stub also serves a minimal OAuth 2.1 + dynamic
+# client registration surface (discovery, register, authorize->302, token) and the
+# MCP endpoint requires the bearer the stub issued. The explicit-flow e2e (B5)
+# exercises this; Slice A's tests leave it off and see the original behavior.
+OAUTH_MODE = os.environ.get("TOONFMT_STUB_OAUTH") == "1"
+
+# The single access token this stub will mint + accept, and the refresh token it
+# hands out. Fixed strings keep the e2e assertions simple; rotation is exercised by
+# the refresh endpoint returning a *second* access token.
+ISSUED_ACCESS_TOKEN = "stub-access-token-v1"
+REFRESHED_ACCESS_TOKEN = "stub-access-token-v2"
+ISSUED_REFRESH_TOKEN = "stub-refresh-token"
+# An authorization code the authorize endpoint redirects with, exchanged at /token.
+ISSUED_CODE = "stub-auth-code"
 
 # The shared content payload: a JSON object serialized to a *string*, placed in
 # content[].text. Identical across all three probes — only the HTTP framing
@@ -206,7 +224,53 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return self.rfile.read(length) if length else b""
 
+    def _send_json(self, status: int, obj: dict) -> None:
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
+        path = urlparse(self.path).path
+
+        # --- OAuth discovery (only in OAuth mode) ---
+        if OAUTH_MODE and path == "/.well-known/oauth-authorization-server":
+            base = f"http://{self.headers.get('Host', '127.0.0.1')}"
+            self._send_json(
+                200,
+                {
+                    "issuer": base,
+                    "authorization_endpoint": f"{base}/authorize",
+                    "token_endpoint": f"{base}/token",
+                    "registration_endpoint": f"{base}/register",
+                    "response_types_supported": ["code"],
+                    "code_challenge_methods_supported": ["S256"],
+                    "grant_types_supported": ["authorization_code", "refresh_token"],
+                },
+            )
+            return
+
+        # --- OAuth authorize: 302 straight back to the client's redirect_uri with
+        # code+state. A real server would render a consent page; the stub
+        # auto-approves so the headless test browser (a plain GET that follows
+        # redirects) completes the loopback callback with no human. ---
+        if OAUTH_MODE and path == "/authorize":
+            params = parse_qs(urlparse(self.path).query)
+            redirect_uri = params.get("redirect_uri", [None])[0]
+            state = params.get("state", [""])[0]
+            if not redirect_uri:
+                self.send_response(400)
+                self.end_headers()
+                return
+            sep = "&" if "?" in redirect_uri else "?"
+            location = f"{redirect_uri}{sep}code={ISSUED_CODE}&state={state}"
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.end_headers()
+            return
+
         # The optional server->client SSE stream. We don't open one; 405 tells
         # the client it's unsupported. toonfmt should warn (not silently drop)
         # if it ever expects this — the e2e checks for that warning's absence.
@@ -219,10 +283,72 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
+        path = urlparse(self.path).path
+
+        # --- OAuth dynamic client registration ---
+        if OAUTH_MODE and path == "/register":
+            raw = self._read_body()
+            try:
+                req = json.loads(raw)
+            except json.JSONDecodeError:
+                self.send_response(400)
+                self.end_headers()
+                return
+            # Echo back a public-client registration. client_id is fixed so the
+            # e2e can assert on it; redirect_uris echoed per the request.
+            self._send_json(
+                201,
+                {
+                    "client_id": "stub-client-id",
+                    "client_name": req.get("client_name", "toonfmt"),
+                    "redirect_uris": req.get("redirect_uris", []),
+                    "grant_types": req.get("grant_types", []),
+                    "token_endpoint_auth_method": "none",
+                },
+            )
+            return
+
+        # --- OAuth token endpoint: authorization_code exchange AND refresh_token ---
+        if OAUTH_MODE and path == "/token":
+            raw = self._read_body()
+            form = parse_qs(raw.decode("utf-8"))
+            grant = form.get("grant_type", [""])[0]
+            if grant == "authorization_code":
+                access = ISSUED_ACCESS_TOKEN
+            elif grant == "refresh_token":
+                # Rotation: a refresh yields a *different* access token, so a test
+                # can prove the refreshed token is what gets persisted/used.
+                access = REFRESHED_ACCESS_TOKEN
+            else:
+                self._send_json(400, {"error": "unsupported_grant_type"})
+                return
+            self._send_json(
+                200,
+                {
+                    "access_token": access,
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "refresh_token": ISSUED_REFRESH_TOKEN,
+                    "scope": "mcp",
+                },
+            )
+            return
+
         # Record the Authorization header seen on every POST (surfaced via the
         # probe_auth_seen tool's content — see _last_auth_header).
         global _last_auth_header
         _last_auth_header = self.headers.get("Authorization")
+
+        # In OAuth mode the MCP endpoint requires the bearer we issued. This is what
+        # makes the e2e meaningful: a serve path that didn't load+attach the token
+        # gets 401, not a silent success.
+        if OAUTH_MODE:
+            expected = {f"Bearer {ISSUED_ACCESS_TOKEN}", f"Bearer {REFRESHED_ACCESS_TOKEN}"}
+            if _last_auth_header not in expected:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Bearer realm="mcp"')
+                self.end_headers()
+                return
 
         raw = self._read_body()
         try:

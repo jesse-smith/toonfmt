@@ -428,12 +428,18 @@ locally** unless the transport's async send/receive ordering forces correlation.
   → generic `run`. No stored token → **fail fast** to stderr ("run `toonfmt login <url>` first"); the
   serve path **never** launches a browser (keeps `initialize` non-blocking — the property that lets
   B stand alone).
-- [ ] **B5 — OAuth stub + explicit-flow e2e.** Extend `tests/fixtures/http_mcp_stub.py` (zero-dep
+- [x] **B5 — OAuth stub + explicit-flow e2e.** Extend `tests/fixtures/http_mcp_stub.py` (zero-dep
   stdlib) with OAuth endpoints: `.well-known` discovery, dynamic client registration, an authorize
   endpoint that 302s to the callback with `code`+`state`, a token endpoint (exchange + refresh); the
   MCP endpoint requires the issued bearer. New `tests/oauth_e2e.rs`: drive `login` with a **test
   browser closure** (reqwest GET of the auth URL — no human) → assert token persisted → run serve →
   `tools/call` returns **TOON** → second serve **reuses** the cached token (no re-auth).
+  *Landed note:* the e2e drives the **real binary** (not the Rust `login` fn), so the test "browser"
+  is a `python3 tests/fixtures/headless_browser.py` subprocess wired via `TOONFMT_BROWSER_CMD` (GETs
+  the auth URL, follows the stub's 302→loopback) — a faithful upgrade over the sketched reqwest
+  closure: it exercises the binary's actual browser seam. Token reuse is proven by pointing
+  `TOONFMT_BROWSER_CMD=false` on the second serve, so any stray browser launch would diverge.
+  `tests/oauth_e2e.rs::explicit_oauth_login_persist_serve_toon_reuse` green; 71 tests total.
 - [ ] **B6 — MANUAL GATE (keeper acceptance).** Run the explicit flow in real Claude Code against
   the stub (or a user-supplied OAuth MCP): `login` once, then confirm the serve path returns TOON'd
   results in-client. *Also* probe — for Slice C's benefit — whether Claude Code tolerates a
