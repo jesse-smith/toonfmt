@@ -1,9 +1,5 @@
 {
   "mcpServers": {
-    "routing-probe": {
-      "command": "python3",
-      "args": ["tests/fixtures/json_mcp_stub.py"]
-    },
     "databricks": {
       "command": "npx",
       "args": [
@@ -20,24 +16,6 @@
         "https://adb-3403296355644133.13.azuredatabricks.net/api/2.0/mcp/sql",
         "--bearer-env",
         "DATABRICKS_TOKEN"
-      ]
-    },
-    "databricks-toon-viamcpremote": {
-      "command": "/Users/jsmith79/Documents/Projects/SideProjects/toonfmt/target/release/toonfmt",
-      "args": [
-        "--",
-        "npx",
-        "mcp-remote",
-        "https://adb-3403296355644133.13.azuredatabricks.net/api/2.0/mcp/sql",
-        "--header",
-        "Authorization: Bearer ${DATABRICKS_TOKEN}"
-      ]
-    },
-    "parallel-search-streamable": {
-      "command": "npx",
-      "args": [
-        "mcp-remote",
-        "https://search.parallel.ai/mcp"
       ]
     },
     "parallel-search-toon": {
