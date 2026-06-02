@@ -6,6 +6,7 @@
 mod cli;
 mod credential_store;
 mod http_upstream;
+mod oauth;
 mod jsonrpc;
 mod proxy;
 mod transform;

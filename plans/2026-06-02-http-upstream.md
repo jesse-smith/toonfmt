@@ -415,7 +415,7 @@ locally** unless the transport's async send/receive ordering forces correlation.
   `CredentialStore` (`async load/save/clear` over `StoredCredentials`) backed by
   `~/.toonfmt-auth/<url-hash>.json` at `0600`. Unit tests: save→load round-trip, `clear`, per-URL
   isolation (two URLs → two files), perms assertion, missing-file → `Ok(None)`.
-- [ ] **B3 — OAuth flow driver (SPIKE-FIRST).** **First: read rmcp's
+- [x] **B3 — OAuth flow driver (SPIKE-FIRST).** **First: read rmcp's
   `examples/clients/src/auth/oauth_client.rs`** to pin the exact `OAuthState` API (redirect-URI
   config, who binds the listener, `start_authorization`/`handle_callback` signatures) — same spike
   discipline that de-risked A1; record durable facts in memory. Then `src/oauth.rs`: bind a
