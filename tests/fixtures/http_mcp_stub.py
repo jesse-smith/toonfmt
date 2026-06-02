@@ -73,7 +73,21 @@ TOOLS = [
         "description": "Same payload as an SSE event whose JSON is split across multiple data: lines (buffering canary).",
         "inputSchema": _empty_schema(),
     },
+    {
+        "name": "probe_auth_seen",
+        "description": "Returns the Authorization header the server observed, as a JSON-string content block.",
+        "inputSchema": _empty_schema(),
+    },
 ]
+
+# The most recent `Authorization` header the server saw on any POST. Surfaced via
+# the `probe_auth_seen` tool's *content* (which rmcp preserves verbatim — A1),
+# NOT via initialize's serverInfo (rmcp's typed `Implementation` struct drops
+# unknown fields, so an echo there would not survive the round-trip). This lets an
+# e2e assert on the wire that `--bearer-env` produced `Authorization: Bearer <tok>`
+# and that no-bearer sends no header — behavior a Rust unit test of token
+# *resolution* cannot reach.
+_last_auth_header = None
 
 
 def log(msg: str) -> None:
@@ -86,10 +100,18 @@ def _content_block() -> dict:
 
 
 def _tools_call_result(req_id, tool_name) -> dict:
-    # All three probes carry the identical content block; framing is chosen by
-    # the caller (handler) based on tool_name, not here.
+    # All three framing probes carry the identical content block; framing is
+    # chosen by the caller (handler) based on tool_name, not here.
     if tool_name in ("probe_content_only", "probe_sse", "probe_sse_split"):
         result = {"content": [_content_block()], "isError": False}
+    elif tool_name == "probe_auth_seen":
+        # Echo the observed Authorization header as a JSON-object string, so it
+        # both verifies auth AND rides the transform path (content survives rmcp).
+        payload = {"authorization": _last_auth_header}
+        result = {
+            "content": [{"type": "text", "text": json.dumps(payload)}],
+            "isError": False,
+        }
     else:
         return {
             "jsonrpc": "2.0",
@@ -197,6 +219,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
+        # Record the Authorization header seen on every POST (surfaced via the
+        # probe_auth_seen tool's content — see _last_auth_header).
+        global _last_auth_header
+        _last_auth_header = self.headers.get("Authorization")
+
         raw = self._read_body()
         try:
             msg = json.loads(raw)

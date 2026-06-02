@@ -209,3 +209,102 @@ async fn http_upstream_transforms_across_framings() {
     let _ = child.wait().await;
     stub.kill().await.ok();
 }
+
+/// Drive the handshake then a single `probe_auth_seen` call (id 7), returning the
+/// TOON'd content text the stub produced (which carries the `Authorization` header
+/// the server observed). `bearer_env` optionally sets `--bearer-env VAR` with
+/// `VAR=token`. Shared by the present/absent bearer assertions below.
+async fn observed_auth_header(bearer: Option<(&str, &str)>) -> String {
+    let (mut stub, port) = spawn_stub().await;
+    let url = format!("http://127.0.0.1:{port}/mcp");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_toonfmt"));
+    cmd.arg("--http").arg(&url);
+    if let Some((var, token)) = bearer {
+        cmd.arg("--bearer-env").arg(var).env(var, token);
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn toonfmt --http");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    stdin
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\
+              \"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\
+              \"clientInfo\":{\"name\":\"e2e\",\"version\":\"0.0.0\"}}}\n",
+        )
+        .await
+        .unwrap();
+    stdin.flush().await.unwrap();
+    let _ = read_responses(&mut stdout, &[1]).await;
+
+    stdin
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+        .await
+        .unwrap();
+    stdin
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\
+              \"params\":{\"name\":\"probe_auth_seen\",\"arguments\":{}}}\n",
+        )
+        .await
+        .unwrap();
+    stdin.flush().await.unwrap();
+
+    let resp = read_responses(&mut stdout, &[7]).await;
+    let text = resp[&7]["result"]["content"][0]["text"]
+        .as_str()
+        .expect("probe_auth_seen content[0].text is a string")
+        .to_string();
+
+    drop(stdin);
+    let mut leftover = String::new();
+    let _ =
+        tokio::time::timeout(Duration::from_secs(5), stdout.read_to_string(&mut leftover)).await;
+    let _ = child.wait().await;
+    stub.kill().await.ok();
+    text
+}
+
+/// `--bearer-env <VAR>` must put `Authorization: Bearer <token>` on the wire, with
+/// the token sourced from the env var (never argv). Asserted on the wire via the
+/// `probe_auth_seen` tool, whose content the server fills with the header it saw
+/// (content survives rmcp verbatim — unlike serverInfo, whose typed struct drops
+/// unknown fields). The `cli.rs` unit test only covers token *resolution*; this
+/// covers that rmcp's transport actually transmits the header.
+#[tokio::test]
+async fn http_upstream_sends_bearer_from_env() {
+    if !have_python3() {
+        eprintln!("SKIP http_upstream_e2e (bearer present): python3 not available on PATH");
+        return;
+    }
+    let text = observed_auth_header(Some(("TOONFMT_E2E_BEARER", "s3cret-token"))).await;
+    // The stub returns {"authorization": "Bearer s3cret-token"}; toonfmt TOON-encodes
+    // it, so assert on the (TOON) text rather than parsing JSON.
+    assert!(
+        text.contains("Bearer s3cret-token"),
+        "the env-var token must arrive as `Authorization: Bearer s3cret-token`; got: {text:?}"
+    );
+}
+
+/// No `--bearer-env` → no `Authorization` header on the wire (the stub reports the
+/// header it saw as JSON `null`, which TOON-encodes as `authorization: null`).
+#[tokio::test]
+async fn http_upstream_sends_no_auth_without_bearer() {
+    if !have_python3() {
+        eprintln!("SKIP http_upstream_e2e (bearer absent): python3 not available on PATH");
+        return;
+    }
+    let text = observed_auth_header(None).await;
+    assert!(
+        !text.contains("Bearer"),
+        "without --bearer-env there must be no Authorization header; got: {text:?}"
+    );
+}
