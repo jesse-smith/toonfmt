@@ -283,6 +283,10 @@ locally** unless the transport's async send/receive ordering forces correlation.
   that. If something does, the GET-stream-forwarding addendum is required before Slice A lands.
   Record all outcomes in this plan. (This is the verification step the user explicitly wants —
   it gates Slice A landing, alongside cairn-accept.)
+<!-- A7 STATUS (2026-06-02): docs DONE + committed (1c9a917); cairn-verify DONE
+  (cargo build + cargo test green, 51 tests, clippy -D warnings clean). The box
+  stays unchecked only because A7 also bundles cairn-ACCEPT, which gates on A6
+  (the user-supplied real-MCP check). Flip to [x] when A6 lands. -->
 - [ ] **A7 — docs + cairn-verify/accept for Slice A.** `ARCHITECTURE.md`: record the
   **semantic-vs-byte-identical passthrough amendment** (HTTP leg); add HTTP upstream to the
   transport description; add `--http`/`--bearer-env` to the config surface; note OAuth as the
