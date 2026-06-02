@@ -4,13 +4,14 @@
 //! and pumps JSON-RPC both directions unchanged. The TOON transform lands later.
 
 mod cli;
+mod http_upstream;
 mod jsonrpc;
 mod proxy;
 mod transform;
 
 use std::process::ExitCode;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use cli::Upstream;
 
@@ -43,11 +44,12 @@ async fn run() -> Result<ExitCode> {
             let code = status.code().unwrap_or(1);
             Ok(ExitCode::from(code as u8))
         }
-        // Wired in A4 (HTTP driver). Resolve the bearer token now so a
-        // misconfigured `--bearer-env` fails fast even before the driver lands.
+        // HTTP upstream: resolve the bearer token (fail-fast on a misconfigured
+        // `--bearer-env`) before connecting, then run the rmcp-backed driver.
         Upstream::Http(http) => {
-            let _bearer = http.resolve_bearer()?;
-            bail!("HTTP upstream (`--http`) is not wired yet; lands in task A4");
+            let bearer = http.resolve_bearer()?;
+            http_upstream::run(http, bearer).await?;
+            Ok(ExitCode::SUCCESS)
         }
     }
 }

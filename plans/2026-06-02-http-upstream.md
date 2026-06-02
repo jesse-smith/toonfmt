@@ -223,7 +223,7 @@ locally** unless the transport's async send/receive ordering forces correlation.
   e2e test reads exactly that line before connecting** (the stdio stub `json_mcp_stub.py` has no
   port to advertise, so there's no existing pattern to mirror — this is the contract, stated
   here so A5 doesn't improvise).
-- [ ] **A4 — HTTP driver (`src/http_upstream.rs`) + dispatch (`src/proxy.rs`,
+- [x] **A4 — HTTP driver (`src/http_upstream.rs`) + dispatch (`src/proxy.rs`,
   `src/main.rs`).** New module bridging stdio client ↔ rmcp HTTP transport. Wire `proxy::run` to
   `match Upstream { Stdio → existing, Http → this }`. Keep trace/debug logging; stdout carries
   protocol bytes only (logs → stderr).
@@ -260,7 +260,7 @@ locally** unless the transport's async send/receive ordering forces correlation.
     (not a re-test of `tools_call_result`, which is already covered): a `tools/call`-correlated
     response → `Some(TOON)`; a response whose id the tracker doesn't know → `None` (tracker-miss
     path, *not* an absent-`result` path); a non-`tools/call`-correlated response → `None`.
-- [ ] **A5 — e2e (`tests/http_upstream_e2e.rs`).** Spawn the A3 stub, read the `PORT <n>` line,
+- [x] **A5 — e2e (`tests/http_upstream_e2e.rs`).** Spawn the A3 stub, read the `PORT <n>` line,
   spawn `toonfmt --http http://127.0.0.1:<port>/…`; drive
   initialize/initialized/tool-calls/tools-list over stdio. Assert: (1) `probe_content_only` →
   `content[0].text` is TOON (not JSON-parseable) + payload preserved; (2) `probe_sse`

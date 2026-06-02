@@ -66,6 +66,32 @@ where
     Ok(())
 }
 
+/// The transport-blind downstream (upstream → client) decision: given an
+/// already-parsed response envelope and the request tracker, decide whether to
+/// rewrite it. Returns `Some(serialized)` to replace the message, `None` to
+/// forward it unchanged.
+///
+/// Shared verbatim by the stdio pump and the HTTP driver — the only difference
+/// between the legs is how the `Value` is obtained (parsed from a stdio line vs.
+/// `to_value` of an rmcp message), never what we do with it. The correlation is
+/// causal on both legs: the request that set the tracker entry is always sent
+/// before its response can arrive.
+pub fn transform_downstream(value: Value, tracker: &RequestTracker) -> Option<String> {
+    let Message::Response { id } = classify(&value) else {
+        return None; // not a response (request/notification/other) → passthrough
+    };
+    let Some(method) = tracker.take_method(&id) else {
+        return None; // uncorrelated response (unknown id) → passthrough
+    };
+    if method != "tools/call" {
+        tracing::trace!(%method, "response correlated (passthrough)");
+        return None;
+    }
+    // The owned, already-parsed envelope goes straight to the transform — no
+    // second parse. Some(replacement) rewrites the message; None forwards it.
+    transform::tools_call_result(value)
+}
+
 /// Spawn the upstream command and run the three-flow pump until the child exits.
 /// Returns the child's exit status so the caller can propagate it.
 pub async fn run(cmd: UpstreamCmd) -> Result<ExitStatus> {
@@ -96,7 +122,9 @@ pub async fn run(cmd: UpstreamCmd) -> Result<ExitStatus> {
         .await
     });
 
-    // upstream → client: resolve the correlated method (trace only; inert this phase).
+    // upstream → client: correlate each response to its request method and, for a
+    // `tools/call`, run the transform. The decision logic is `transform_downstream`,
+    // shared verbatim with the HTTP driver (it's transport-blind).
     let down_tracker = tracker.clone();
     let down = tokio::spawn(async move {
         let stdout = tokio::io::stdout();
@@ -106,19 +134,7 @@ pub async fn run(cmd: UpstreamCmd) -> Result<ExitStatus> {
             let Ok(value) = serde_json::from_str::<Value>(line) else {
                 return None;
             };
-            let Message::Response { id } = classify(&value) else {
-                return None;
-            };
-            let Some(method) = down_tracker.take_method(&id) else {
-                return None; // uncorrelated response — pass through
-            };
-            if method != "tools/call" {
-                tracing::trace!(%method, "response correlated (passthrough)");
-                return None;
-            }
-            // The owned, already-parsed envelope goes straight to the transform —
-            // no second parse. Some(replacement) rewrites the line; None forwards it.
-            transform::tools_call_result(value)
+            transform_downstream(value, &down_tracker)
         })
         .await
     });
@@ -155,6 +171,53 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jsonrpc::RequestId;
+    use serde_json::json;
+
+    /// `transform_downstream` correlation/dispatch logic (not a re-test of
+    /// `tools_call_result`, which `transform.rs` covers). Three paths:
+    ///  - a response whose id was recorded as `tools/call` → `Some(TOON)`;
+    ///  - a response whose id the tracker doesn't know → `None` (tracker-miss,
+    ///    distinct from an absent-`result` path);
+    ///  - a response correlated to a non-`tools/call` method → `None`.
+    #[test]
+    fn transform_downstream_dispatch() {
+        // (1) tools/call-correlated response → transformed (content text was JSON).
+        let tracker = RequestTracker::new();
+        tracker.record_request(RequestId::Num(1), "tools/call".to_string());
+        let inner = r#"{"rows":[{"id":1,"name":"a"}]}"#;
+        let resp = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"content": [{"type": "text", "text": inner}]}
+        });
+        let out = transform_downstream(resp, &tracker).expect("tools/call → Some");
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            serde_json::from_str::<Value>(text).is_err(),
+            "content should now be TOON, not JSON: {text:?}"
+        );
+
+        // (2) tracker-miss: a well-formed response whose id was never recorded.
+        //     Note id 1 was consumed by (1), and 7 was never recorded → miss.
+        let unknown = json!({
+            "jsonrpc": "2.0", "id": 7,
+            "result": {"content": [{"type": "text", "text": inner}]}
+        });
+        assert!(
+            transform_downstream(unknown, &tracker).is_none(),
+            "uncorrelated id → None (passthrough), even with a transformable body"
+        );
+
+        // (3) non-tools/call-correlated response → None.
+        let tracker3 = RequestTracker::new();
+        tracker3.record_request(RequestId::Num(2), "tools/list".to_string());
+        let list_resp = json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}});
+        assert!(
+            transform_downstream(list_resp, &tracker3).is_none(),
+            "tools/list response → None (passthrough)"
+        );
+    }
 
     /// bytes in == bytes out, across a JSON line, a non-JSON line, and a final
     /// line with no trailing newline. A `None`-returning callback is the Phase 1
