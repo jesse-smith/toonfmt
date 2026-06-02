@@ -32,6 +32,20 @@
         "--header",
         "Authorization: Bearer ${DATABRICKS_TOKEN}"
       ]
+    },
+    "parallel-search-streamable": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://search.parallel.ai/mcp"
+      ]
+    },
+    "parallel-search-toon": {
+      "command": "/Users/jsmith79/Documents/Projects/SideProjects/toonfmt/target/release/toonfmt",
+      "args": [
+        "--http",
+        "https://search.parallel.ai/mcp"
+      ]
     }
   }
 }

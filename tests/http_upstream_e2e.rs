@@ -308,3 +308,54 @@ async fn http_upstream_sends_no_auth_without_bearer() {
         "without --bearer-env there must be no Authorization header; got: {text:?}"
     );
 }
+
+/// Regression: a `tools/call` immediately followed by stdin EOF must still deliver
+/// its response. The driver drains in-flight requests on stdin close instead of
+/// tearing down — without this, the response is lost (caught live against the
+/// Databricks SQL MCP, whose async result arrived after the heredoc's EOF). Here
+/// we write initialize + initialized + a tool call, then drop stdin at once.
+#[tokio::test]
+async fn http_upstream_drains_inflight_response_on_stdin_eof() {
+    if !have_python3() {
+        eprintln!("SKIP http_upstream_e2e (drain): python3 not available on PATH");
+        return;
+    }
+
+    let (mut stub, port) = spawn_stub().await;
+    let url = format!("http://127.0.0.1:{port}/mcp");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_toonfmt"))
+        .args(["--http", &url])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn toonfmt --http");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // Write the whole conversation, then drop stdin immediately (EOF) — no reads in
+    // between, so the tool-call response is necessarily in flight when stdin closes.
+    stdin
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\
+              \"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\
+              \"clientInfo\":{\"name\":\"e2e\",\"version\":\"0.0.0\"}}}\n\
+              {\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n\
+              {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\
+              \"params\":{\"name\":\"probe_content_only\",\"arguments\":{}}}\n",
+        )
+        .await
+        .unwrap();
+    stdin.flush().await.unwrap();
+    drop(stdin); // EOF right away
+
+    // Despite the immediate EOF, the id-2 response must be drained and forwarded.
+    let resp = read_responses(&mut stdout, &[2]).await;
+    assert_toon(&resp[&2], 2);
+
+    let _ = child.wait().await;
+    stub.kill().await.ok();
+}

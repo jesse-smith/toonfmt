@@ -114,6 +114,16 @@ impl RequestTracker {
             .expect("RequestTracker mutex poisoned")
             .remove(id)
     }
+
+    /// Number of requests sent but not yet answered (recorded, not yet taken).
+    /// Used by the HTTP driver to drain in-flight responses after the client's
+    /// stdin closes, rather than abandoning them.
+    pub fn pending_count(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("RequestTracker mutex poisoned")
+            .len()
+    }
 }
 
 #[cfg(test)]

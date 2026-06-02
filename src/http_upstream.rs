@@ -107,24 +107,55 @@ pub async fn run(upstream: HttpUpstream, bearer: Option<String>) -> Result<()> {
     // Two concurrent halves in one task. Only the `receive()` branch borrows the
     // transport inside `select!`; a stdin message is stashed and sent *after*
     // `select!` returns, so we never hold two `&mut transport` borrows at once.
-    loop {
+    let mut stdin_open = true;
+    while stdin_open {
         let mut pending: Option<Value> = None;
         tokio::select! {
             from_client = rx.recv() => {
                 match from_client {
                     Some(v) => pending = Some(v),
-                    None => break, // client stdin closed → tear down
+                    // Client stdin closed. Don't abandon in-flight requests:
+                    // stop reading stdin and fall through to the drain phase.
+                    None => stdin_open = false,
                 }
             }
             from_upstream = transport.receive() => {
                 match from_upstream {
                     Some(msg) => forward_to_client(&mut stdout, &tracker, msg).await?,
-                    None => break, // upstream ended the session
+                    // Upstream closed the session: nothing left to receive. Break to
+                    // teardown; the drain loop below no-ops (receive() returns None).
+                    None => break,
                 }
             }
         }
         if let Some(v) = pending.take() {
             send_client(&mut transport, &tracker, v).await?;
+        }
+    }
+
+    // === Drain ================================================================
+    // Client stdin closed but responses to already-sent requests may still be in
+    // flight (e.g. an async SQL result). Keep receiving until every outstanding
+    // request id is answered, or a grace period elapses — then tear down. Without
+    // this, a request immediately followed by EOF loses its response. Bounded so a
+    // server that never replies can't hang shutdown.
+    if tracker.pending_count() > 0 {
+        let grace = std::time::Duration::from_secs(30);
+        let drain = async {
+            while tracker.pending_count() > 0 {
+                match transport.receive().await {
+                    Some(msg) => forward_to_client(&mut stdout, &tracker, msg).await?,
+                    None => break, // upstream closed
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+        match tokio::time::timeout(grace, drain).await {
+            Ok(result) => result?,
+            Err(_) => tracing::warn!(
+                outstanding = tracker.pending_count(),
+                "stdin closed; gave up draining in-flight responses after 30s"
+            ),
         }
     }
 

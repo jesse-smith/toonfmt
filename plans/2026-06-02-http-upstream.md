@@ -301,18 +301,33 @@ locally** unless the transport's async send/receive ordering forces correlation.
   - structuredContent: absent on the result → no strip needed (Databricks is content-only,
     like dbmcp).
 
-  BUG FOUND (not an A6 blocker; the transform is proven): the driver tears down the
-  instant client stdin closes (rx.recv() → None → break), abandoning in-flight
-  requests. A request immediately followed by EOF loses its response. Harmless for a
-  synchronous client that keeps stdin open (Claude Code), but a real correctness gap —
-  a quick `printf ... | toonfmt --http` drops the tools/call response unless stdin is
-  held open until the reply arrives. FIX (follow-up): on stdin EOF, stop sending but
-  keep draining transport.receive() until any outstanding request ids are answered (or
-  a timeout), THEN tear down. Tracked for a Slice-A-addendum / hardening commit.
+  BUG FOUND THEN FIXED (same session): the driver tore down the instant client stdin
+  closed (rx.recv() → None → break), abandoning in-flight requests — a request
+  immediately followed by EOF lost its response (caught live: the first Databricks
+  SHOW CATALOGS attempt with no sleep dropped the id-2 reply). FIX (committed): on
+  stdin EOF, stop sending but keep draining transport.receive() until all outstanding
+  request ids are answered or a 30s grace elapses, THEN tear down. Added
+  RequestTracker::pending_count() + a drain phase. Re-verified live: the original
+  no-sleep EOF scenario now delivers the TOON'd result. Regression test added
+  (http_upstream_drains_inflight_response_on_stdin_eof).
 
-  SSE-STREAMING TARGET: still needed from the user (Databricks returned application/json,
-  not chunked SSE, for SHOW CATALOGS) to confirm buffer-until-complete on a real SSE
-  server. A6 is otherwise satisfied for the primary (Databricks) target.
+  SECOND REAL TARGET — Parallel Web Search MCP (https://search.parallel.ai/mcp, NO
+  auth), via native --http: handshake + tools/list (web_search, web_fetch) + a real
+  web_search tools/call all succeed; result returns TOON-encoded (search_id,
+  results[10]{url,title,publish_date,…}), real data, transform fired. Exercises the
+  no-bearer path against a real server.
+
+  SSE NOT YET EXERCISED ON A REAL SERVER (honest gap): BOTH real targets returned
+  application/json, not text/event-stream. Databricks: plain JSON. Parallel: rmcp
+  logged "server doesn't support sse, skip common stream" — it also answered over
+  application/json. So buffer-until-complete-on-real-SSE remains covered ONLY by the
+  stub (probe_sse / probe_sse_split). Not a transform-correctness gap (the transform
+  is transport-blind and proven on two real servers), but the specific "real SSE
+  server" line item in A6's acceptance is still open — needs a target that actually
+  streams. Recorded rather than glossed.
+
+  GET-stream check (both targets): NO server-initiated message observed (RUST_LOG
+  clean; no tracing::warn!) → deferral justified for both.
 
   A0 (mcp-remote composition) folded into this batch: .mcp.json has
   `databricks-toon-viamcpremote` (toonfmt -- npx mcp-remote …) for the post-restart
