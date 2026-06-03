@@ -121,8 +121,18 @@ constitution-protected handshake) — then a cliff to 11 (`transform`), 10 (`pro
 tail ≤8. Gate decision (clippy `cognitive_complexity` @ 20) stands; Q4 wires it.
 
 ## Q2 results (2026-06-03)
-**Coverable surface 92.97% → 94.01% (1518 lines, 91 missed).** +11 intent-asserting tests across the
-bucket-(C) gaps, all green (`cargo test`: 121 total, 0 fail). No filler — each asserts a contract:
+**Coverable surface 92.97% → ~93–94% lines (run-to-run variance, see note).** +11 intent-asserting
+tests across the bucket-(C) gaps, all green (`cargo test`: 121 total, 0 fail). No filler — each
+asserts a contract:
+
+> **Measurement note (diagnosed 2026-06-03):** the headline number swings ~93.3–94.1% between
+> identical runs. The variance is confined entirely to `http_upstream.rs` (71.6–80.9%) — the only
+> file exercised through a *spawned `toonfmt` subprocess* (the `http_upstream_e2e` tests).
+> `cargo-llvm-cov` loses a subprocess's `.profraw` when it's killed before flushing, so the e2e's
+> contribution to that file's coverage is timing-dependent. The pure-unit files are stable to the
+> line across runs. This is a known cargo-llvm-cov + subprocess-kill interaction, **not** a flaky
+> test (all tests pass deterministically) and not a source regression. The number is honest and
+> reproducible *as a range*; the residual analysis below is what's load-bearing, not the exact %.
 - `jsonrpc`: out-of-i64 id is a *stable correlation key* (not byte-identity — serde renders `1e+20`;
   the test that initially asserted byte-identity **caught that** and was corrected to the real
   contract), non-scalar id → Notification, both-absent → Other.
@@ -183,7 +193,8 @@ distinction) rather than implementation detail.
   are line-level tangles, not clean files — recorded as a Q3 signal / accepted residual instead);
   coverable-surface baseline 92.97%. Bucket-(C) coverable gaps enumerated for Q2.
 - [x] **Q2 — Close coverage gaps on the coverable surface.** *(done 2026-06-03 — see "Q2 results".)*
-  +11 intent-asserting tests; coverable surface 92.97% → **94.01%**. Remaining 91 missed lines are
+  +11 intent-asserting tests; coverable surface 92.97% → **~93–94%** (run-variance, see note above).
+  Remaining ~90 missed lines are
   the justified residual (irreducible I/O, test-only panic arms, stub-limited integration arms,
   defensive guards) — enumerated above. ~100% of the *cheaply* coverable surface is now covered; the
   rest needs stub work (deferred) or asserting implementation mechanics (declined). `cargo test`
