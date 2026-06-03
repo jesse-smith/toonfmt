@@ -2,6 +2,12 @@
 name = "toonfmt"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "A transparent MCP proxy that TOON-encodes tool-call results to cut the tokens a model ingests per call."
+repository = "https://github.com/jesse-smith/toonfmt"
+readme = "README.md"
+keywords = ["mcp", "toon", "proxy", "llm", "tokens"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1.0.102"
