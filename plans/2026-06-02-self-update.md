@@ -2,7 +2,18 @@
 
 **Date:** 2026-06-02  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-06-02-release-v0.1.md (Phase A — v0.1 release, landed; this was its deferred Phase B)
-**Status:** drafted  <!-- drafted | in progress | landed -->
+**Status:** landed  <!-- drafted | in progress | landed -->
+**Landed:** 2026-06-03 — axoupdater **0.10.0** (no API drift vs. dbtoon's 0.9). Two
+  corrections to the plan's guidance, both found by verifying rather than assuming:
+  (1) `run_update` must be dispatched via `tokio::task::spawn_blocking` — `run_sync`
+  calls `block_on` internally and panics under `#[tokio::main]` (the plan said "call
+  directly without .await"; the unit tests alone don't catch it, only the real binary);
+  (2) 0.10.0 reworded the no-receipt error ("Unable to load receipt for app <name>"),
+  matching none of the ported 0.9 substring matchers → added an "unable to load" arm
+  plus a regression test pinning the verbatim wording. Also made `no_receipt_returns_ok`
+  hermetic/offline via `AXOUPDATER_CONFIG_PATH` (it was loading a stray receipt + hitting
+  the network). 80 unit tests green, clippy `-D warnings` clean, both real-binary paths
+  verified (no-receipt → cargo guidance exit 0; real receipt → live "up to date" exit 0).
 
 ## Goal
 Let a user who installed `toonfmt` via the v0.1.0 shell/PowerShell installer upgrade in place
@@ -52,7 +63,7 @@ which is the working reference for this exact pattern. Decisions:
 ## Tasks
 <!-- Concrete file paths and code where reasonable. NO placeholders. -->
 
-- [ ] **B1 — `axoupdater` dep + `Command::Update` CLI variant.** Add `axoupdater` to
+- [x] **B1 — `axoupdater` dep + `Command::Update` CLI variant.** Add `axoupdater` to
   `Cargo.toml` (try `0.10.0`, features `["github_releases", "blocking"]`, `default-features = false`;
   fall back to `0.9` if it won't build). In `src/cli.rs`: add `Update` to `enum Command`
   (`src/cli.rs:94`); in `parse_args` (`src/cli.rs:108`) detect a leading `update` token the same
@@ -61,7 +72,7 @@ which is the working reference for this exact pattern. Decisions:
   (`src/cli.rs:227`): `update` parses to `Command::Update`; `update --http x` / `update foo`
   error; existing serve/login/stdio/bearer tests still pass. Update the top-level usage string
   if it enumerates commands.
-- [ ] **B2 — `src/update.rs` (`run_update`) + main dispatch.** New `src/update.rs` mirroring
+- [x] **B2 — `src/update.rs` (`run_update`) + main dispatch.** New `src/update.rs` mirroring
   dbtoon's: `AxoUpdater::new_for("toonfmt")`, `set_current_version(env!("CARGO_PKG_VERSION").parse()?)`,
   `load_receipt()` with the graceful no-receipt branch (print "installed via cargo/source →
   update that way", return `Ok(())` — **never** error or clobber), then `run_sync()` matching
@@ -73,7 +84,7 @@ which is the working reference for this exact pattern. Decisions:
   `src/main.rs:6`) and a `Command::Update => update::run_update()` arm in the dispatch
   (`src/main.rs:46`) — note the serve/login arms are `async`; `run_update` is sync (blocking
   feature), so call it directly without `.await`.
-- [ ] **B3 — Docs + cairn-accept (self-update).** Document `toonfmt update` in `README.md` (a
+- [x] **B3 — Docs + cairn-accept (self-update).** Document `toonfmt update` in `README.md` (a
   short "## Updating" section: works for installer-based installs; source/`cargo install` users
   update the way they installed) and in `ARCHITECTURE.md` "Config surface" → Commands (currently
   lists serve + login; add update + the receipt-only caveat). Update memory

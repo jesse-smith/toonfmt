@@ -10,6 +10,7 @@ mod oauth;
 mod jsonrpc;
 mod proxy;
 mod transform;
+mod update;
 
 use std::process::ExitCode;
 
@@ -45,6 +46,18 @@ async fn run() -> Result<ExitCode> {
     match cli::parse_args(std::env::args().skip(1))? {
         Command::Serve(upstream) => serve(upstream).await,
         Command::Login(args) => login(args).await,
+        // `run_update` is a sync fn (the axoupdater `blocking` feature), but
+        // `run_sync` calls `block_on` *internally* — which panics if invoked on a
+        // thread already driving a runtime, and `main` is `#[tokio::main]`. So run
+        // it on a blocking thread where no runtime is active. It returns `Ok(())`
+        // for the graceful no-receipt / already-current cases, `Err` only on real
+        // failures.
+        Command::Update => {
+            tokio::task::spawn_blocking(update::run_update)
+                .await
+                .context("update task panicked")?
+                .map(|()| ExitCode::SUCCESS)
+        }
     }
 }
 
