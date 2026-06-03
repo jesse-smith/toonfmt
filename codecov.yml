@@ -1,0 +1,7 @@
+# Codecov config. `coverage.range` drives the badge/UI color gradient:
+# the low bound and below renders red, the high bound and above renders green,
+# with a yellow→green gradient between. Per request: red ≤80%, green ≥90%.
+coverage:
+  range: "80...90"
+  round: down
+  precision: 2

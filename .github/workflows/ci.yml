@@ -42,7 +42,8 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: codecov.json
-          # false (NOT dbtoon's true): this repo has no CODECOV_TOKEN secret yet, and
-          # a missing-token upload error must not turn the whole CI run red. Tokenless
-          # uploads still work for public repos; set the secret later to harden.
-          fail_ci_if_error: false
+          # true now that CODECOV_TOKEN is set and a clean authenticated upload was
+          # verified on PR #3: a broken upload should fail the run rather than rot
+          # silently. (Was false for the first run so a token/config hiccup couldn't
+          # redden CI before we'd seen one succeed.)
+          fail_ci_if_error: true
