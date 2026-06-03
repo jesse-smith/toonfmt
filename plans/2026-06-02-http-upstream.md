@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-02  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-05-28-toon-transform.md (Phase 2 — transform, landed)
-**Status:** Slice A landed (2026-06-02) · Slice B (explicit OAuth) landed (2026-06-02) · Slice C (interactive OAuth) deferred  <!-- drafted | in progress | landed -->
+**Status:** Slice A landed (2026-06-02) · Slice B (explicit OAuth) landed (2026-06-02) · Slice C (interactive OAuth) landed (2026-06-02)  <!-- drafted | in progress | landed -->
 
 ## Goal
 toonfmt is stdio↔stdio today: it spawns an upstream child and pumps JSON-RPC over its
@@ -499,8 +499,16 @@ locally** unless the transport's async send/receive ordering forces correlation.
   capabilities (a passthrough violation). Unknown #1 (does Claude Code honor stdio elicitation) is
   therefore **moot** — even a "yes" can't fix the timing. C1's auto-open is the right convenience
   layer: it fits rmcp's model exactly (auth-before-initialize, just auto-triggered).
-- [ ] **C3 — docs + accept.** Record the keep/discard verdict for each channel in `ARCHITECTURE.md`
-  + memory; cairn-accept Slice C.
+- [x] **C3 — docs + accept.** `ARCHITECTURE.md` updated in four sites: the `.mcp.json` intro example
+  (added an `oauth-svc-interactive` row), the `--bearer-env` mutual-exclusion note (now lists
+  `--oauth-interactive`), the OAuth Config section (full `--oauth-interactive` bullet + a
+  `--oauth`-vs-interactive "choosing between them" note + the rejected-stderr-prompt and
+  discarded-elicitation rationale), and the Phase-3 Scope note (Slice C landed, keep/discard verdict).
+  Memory `slice-c-oauth-channels.md` records the kept/discarded channels with the why for each
+  (links [[rmcp-oauth-api]], [[b6-claude-code-oauth-findings]]). Gates: 74 tests green, clippy
+  `-D warnings` clean. cairn-accept Slice C (Status flipped to landed). **User-gated next step (not
+  done here):** live in-client manual acceptance of `--oauth-interactive` against a real OAuth server
+  (parallel to B6) — auto-open's in-client UX is verified only against the headless stub so far.
 
 <!-- VERIFICATION TARGETS the user will supply when ready (do not invent / hardcode):
   1. Databricks SQL MCP (token auth) — primary, Slice A (A6).
