@@ -2,7 +2,18 @@
 
 **Date:** 2026-06-03  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-06-02-self-update.md (Phase B — self-update; this is independent, queue after it)
-**Status:** in progress  <!-- drafted | in progress | landed -->
+**Status:** landed  <!-- drafted | in progress | landed -->
+**Landed:** 2026-06-03 — H1+H2+H3 in one accept pass on branch `cli-hardening`. No
+  surprises vs. the brainstorm resolutions. Notes worth keeping: (1) `parse_login` and
+  `parse_serve` had to change return type from `LoginArgs`/`Upstream` to `Command` so a
+  `--help` mid-parse can short-circuit to `Command::Help` — `parse_args` no longer wraps
+  with `.map(Command::…)`. (2) Bare `help` is matched **only** as the leading subcommand
+  word (in `parse_args`), never in `meta_command`, so it can't shadow a legitimate flag
+  value like `--bearer-env help`. (3) Gap D verified live: `key_hash(None, url)` reproduces
+  the frozen golden `7692f47…b296c` and the existing per-URL tests pass unchanged with
+  `, None` appended. (4) rustfmt isn't installed in this toolchain, but it's not in the
+  verify gate (`cargo test` + `cargo build`); 99 unit + all e2e green, clippy `-D warnings`
+  clean. (5) `-- echo --help` confirmed to forward `--help` to echo on the real binary.
 
 ## Goal
 Two small, independent new-user / multi-identity fixes, bundled because they share one file
@@ -105,7 +116,7 @@ Two small, independent new-user / multi-identity fixes, bundled because they sha
 ## Tasks
 <!-- Concrete file paths and code where reasonable. NO placeholders. -->
 
-- [ ] **H1 — `--help`/`-h`/`help` + `--version`/`-V`.** Add one canonical `const USAGE` in
+- [x] **H1 — `--help`/`-h`/`help` + `--version`/`-V`.** Add one canonical `const USAGE` in
   `src/cli.rs` (additive — Fork C; leave contextual `bail!`s untouched). Detect the meta tokens in
   the **pre-`--` scan only** (Gap E); return new no-arg `Command` variants; dispatch in
   `src/main.rs` to print (`USAGE` to stdout for help; `toonfmt <version>` for version) and return
@@ -114,7 +125,7 @@ Two small, independent new-user / multi-identity fixes, bundled because they sha
   with other pre-`--` args present; **`-- echo --help` keeps `--help` in the upstream argv** (Gap E
   boundary); `login --help`/`update --help` → Help (pre-empts "requires a URL"/"unexpected
   argument"); existing serve/login/update parse tests still green.
-- [ ] **H2 — `--profile <name>` on login + serve.** Add `profile: Option<String>` to `LoginArgs`
+- [x] **H2 — `--profile <name>` on login + serve.** Add `profile: Option<String>` to `LoginArgs`
   and to `HttpUpstream` (a field alongside `url` — Fork A); parse `--profile` in both `parse_login`
   and `parse_serve`. **Reject** `--profile` on the stdio `--` form, with `--bearer-env`, and with no
   auth (Fork B — `bail!`, mirroring the bearer/OAuth exclusivity at `src/cli.rs:203`). Add a
@@ -129,7 +140,7 @@ Two small, independent new-user / multi-identity fixes, bundled because they sha
   filesystem — it's hashed). Tests: distinct profiles → distinct files for one URL; path-valued
   profile accepted; `None` arm == golden hex; `Some` arm != golden hex; `--profile` rejected on
   stdio / with `--bearer-env` / with no-auth HTTP.
-- [ ] **H3 — Docs + cairn-accept.** README: document `--profile` (and that login/serve must match
+- [x] **H3 — Docs + cairn-accept.** README: document `--profile` (and that login/serve must match
   on *both* URL and profile) + the `--help`/`--version` front door. ARCHITECTURE.md "Config
   surface" → Commands/OAuth: note per-profile keying extends the URL-match gotcha. `cargo clippy
   --all-targets -- -D warnings` clean, `cargo test` green; cairn-accept.
