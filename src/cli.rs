@@ -89,30 +89,45 @@ pub struct LoginArgs {
 }
 
 /// Top-level command. `serve` is the default (no subcommand); `login` runs the
-/// one-shot OAuth flow.
+/// one-shot OAuth flow; `update` self-updates an installer-based build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Serve(Upstream),
     Login(LoginArgs),
+    /// `toonfmt update`: self-update via the install receipt. Takes no arguments.
+    Update,
 }
 
 /// Parse process arguments (excluding argv[0]) into a [`Command`].
 ///
 /// Grammar:
 ///   - `login --http <url>` → [`Command::Login`].
+///   - `update` → [`Command::Update`] (no arguments).
 ///   - `--http <url> [--bearer-env <VAR> | --oauth]` → [`Command::Serve`] HTTP.
 ///   - `-- <program> [args...]` → [`Command::Serve`] stdio.
 ///
 /// Errors on: both upstream shapes, neither shape, a flag missing its value, both
-/// auth selectors together, or auth flags applied to the stdio form.
+/// auth selectors together, auth flags applied to the stdio form, or any argument
+/// after `update`.
 pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Command> {
     let mut it = args.peekable();
 
-    // `login` subcommand: distinguished by the first token. Everything else is the
+    // Subcommands are distinguished by the first token. Everything else is the
     // implicit `serve` command.
-    if it.peek().map(String::as_str) == Some("login") {
-        it.next(); // consume `login`
-        return parse_login(it).map(Command::Login);
+    match it.peek().map(String::as_str) {
+        Some("login") => {
+            it.next(); // consume `login`
+            return parse_login(it).map(Command::Login);
+        }
+        Some("update") => {
+            it.next(); // consume `update`
+            // `update` takes no arguments — anything trailing is a usage error.
+            if let Some(extra) = it.next() {
+                bail!("unexpected argument to `update`: {extra} (usage: toonfmt update)");
+            }
+            return Ok(Command::Update);
+        }
+        _ => {}
     }
 
     parse_serve(it).map(Command::Serve)
@@ -392,6 +407,21 @@ mod tests {
     fn login_rejects_stray_args() {
         assert!(parse(&["login", "--http", "https://x", "--bearer-env", "TOK"]).is_err());
         assert!(parse(&["login", "--", "cat"]).is_err());
+    }
+
+    // --- update subcommand ---
+
+    /// `update` (no args) → Update.
+    #[test]
+    fn update_well_formed() {
+        assert_eq!(parse(&["update"]).unwrap(), Command::Update);
+    }
+
+    /// `update` takes no arguments — any trailing token is an error.
+    #[test]
+    fn update_rejects_extra_args() {
+        assert!(parse(&["update", "foo"]).is_err());
+        assert!(parse(&["update", "--http", "https://x"]).is_err());
     }
 
     // --- bearer resolution (fail-fast), now driven by HttpAuth ---
