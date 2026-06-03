@@ -33,6 +33,19 @@ cargo install --git https://github.com/jesse-smith/toonfmt
 There is no runtime to install: the HTTP client is compiled in, so HTTP upstreams need no
 Node or `mcp-remote` sidecar.
 
+## Updating
+
+If you installed via the shell/PowerShell installer above, upgrade in place:
+
+```sh
+toonfmt update
+```
+
+It checks GitHub Releases and re-runs the installer only if a newer version exists;
+otherwise it reports you're already current. If you installed another way — `cargo
+install`, or from source — `toonfmt update` says so and exits without changing anything;
+update the way you installed (e.g. re-run `cargo install`).
+
 ## Use it
 
 Declare `toonfmt` as the command in your client's MCP config (`.mcp.json` for Claude
