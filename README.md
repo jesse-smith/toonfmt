@@ -11,18 +11,27 @@ child process or a **Streamable HTTP** MCP server, with bearer-token or OAuth au
 
 ## Install
 
-> **Note:** prebuilt binaries and the `curl | sh` installer ship with the first tagged
-> release. Until then, install from source with `cargo install`.
-
-<!-- RELEASE-INSTALLER: replaced with the real dist one-liner at v0.1.0 (task A6) -->
+Prebuilt binaries for macOS (Apple Silicon and Intel), Linux x86-64, and Windows x86-64.
+The installer drops a single `toonfmt` binary on your `PATH`.
 
 ```sh
-# from source (needs a Rust toolchain)
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jesse-smith/toonfmt/releases/latest/download/toonfmt-installer.sh | sh
+```
+
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/jesse-smith/toonfmt/releases/latest/download/toonfmt-installer.ps1 | iex"
+```
+
+Or build from source with a Rust toolchain:
+
+```sh
 cargo install --git https://github.com/jesse-smith/toonfmt
 ```
 
-This puts a single `toonfmt` binary on your `PATH`. There is no runtime to install: the
-HTTP client is compiled in, so HTTP upstreams need no Node or `mcp-remote` sidecar.
+There is no runtime to install: the HTTP client is compiled in, so HTTP upstreams need no
+Node or `mcp-remote` sidecar.
 
 ## Use it
 
