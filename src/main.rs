@@ -92,6 +92,18 @@ async fn serve_http(http: HttpUpstream) -> Result<ExitCode> {
             let transport = StreamableHttpClientTransport::with_client(auth_client, config);
             http_upstream::run(transport).await?;
         }
+        // Interactive OAuth (Slice C): same as OAuth when a token is stored; when
+        // none is, run the authorization-code flow inline (auto-launch the browser)
+        // *before* `initialize`. Opt-in only — it can block the host's startup on a
+        // human at the consent page.
+        HttpAuth::OAuthInteractive => {
+            let store = FileCredentialStore::for_url(&http.url)?;
+            let auth_client =
+                oauth::serve_auth_client_interactive(&http.url, store, open_in_browser_logged)
+                    .await?;
+            let transport = StreamableHttpClientTransport::with_client(auth_client, config);
+            http_upstream::run(transport).await?;
+        }
         // Bearer / no-auth: resolve the token (fail-fast on a misconfigured
         // `--bearer-env`) and set it as the static auth header.
         HttpAuth::None | HttpAuth::Bearer { .. } => {
@@ -149,4 +161,17 @@ fn open_in_browser(url: &str) -> Result<()> {
         .spawn()
         .with_context(|| format!("launching `{cmd}` to open the browser"))?;
     Ok(())
+}
+
+/// [`open_in_browser`] with the authorization URL also echoed to **stderr** first.
+///
+/// The interactive serve path's primary UX is the auto-launched browser — nothing
+/// for the user to read. But B6 measured that Claude Code captures a stdio
+/// subprocess's stderr verbatim into a per-server cache log (not the `/mcp` menu),
+/// so echoing the URL is a zero-cost fallback: if the auto-open fails or the user is
+/// debugging, the clickable URL is recoverable from that log. Used only by
+/// `--oauth-interactive`; the explicit `login` path keeps the bare opener.
+fn open_in_browser_logged(url: &str) -> Result<()> {
+    eprintln!("toonfmt: authorize at: {url}");
+    open_in_browser(url)
 }

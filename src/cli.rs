@@ -3,16 +3,18 @@
 //! Two top-level commands:
 //!   - **serve** (the default, no subcommand): run the proxy. Selects one upstream
 //!     shape — **stdio** (`[flags] -- <program> <args...>`) or **HTTP**
-//!     (`--http <url> [--bearer-env <VAR>] [--oauth]`).
+//!     (`--http <url> [--bearer-env <VAR>] [--oauth | --oauth-interactive]`).
 //!   - **login** (`login --http <url>`): run the OAuth authorization-code flow for
 //!     an HTTP upstream once, persist the tokens, and exit. The serve path then
-//!     loads those tokens — it never launches a browser, so `initialize` is never
-//!     blocked on a human.
+//!     loads those tokens — with `--oauth` it never launches a browser, so
+//!     `initialize` is never blocked on a human.
 //!
-//! For the serve/HTTP shape, exactly one auth selector may be given:
-//! `--bearer-env` and `--oauth` are mutually exclusive (static token vs.
-//! authorization-code grant). `--http` and `--` are mutually exclusive, and one is
-//! required.
+//! For the serve/HTTP shape, exactly one auth *family* may be given: `--bearer-env`
+//! (static token) is mutually exclusive with the OAuth flags. `--oauth` and
+//! `--oauth-interactive` are the same authorization-code grant differing only in the
+//! missing-token case (fail-fast vs. auto-launch the browser at serve time); giving
+//! both resolves to interactive. `--http` and `--` are mutually exclusive, and one
+//! is required.
 
 use anyhow::{Result, bail};
 
@@ -36,6 +38,13 @@ pub enum HttpAuth {
     /// OAuth 2.1 authorization-code grant. The token is obtained out-of-band by
     /// `toonfmt login` and loaded from the credential store at serve time.
     OAuth,
+    /// OAuth 2.1, but the serve path itself runs the authorization-code flow when
+    /// no token is stored (auto-launching the browser), instead of fail-fast. A
+    /// superset of [`HttpAuth::OAuth`]: a present token is reused identically; only
+    /// the missing-token case differs (interactive login vs. error). Gated behind
+    /// the explicit `--oauth-interactive` opt-in because it can block `initialize`
+    /// on a human — acceptable only when the user asked for it.
+    OAuthInteractive,
 }
 
 /// An HTTP (Streamable HTTP) MCP upstream.
@@ -136,6 +145,7 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
     let mut http_url: Option<String> = None;
     let mut bearer_env: Option<String> = None;
     let mut oauth = false;
+    let mut oauth_interactive = false;
     let mut after_sep: Option<Vec<String>> = None;
 
     let mut it = args;
@@ -160,6 +170,7 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
                 bearer_env = Some(var);
             }
             "--oauth" => oauth = true,
+            "--oauth-interactive" => oauth_interactive = true,
             // Other pre-`--` tokens are reserved for later-phase flags; ignore.
             _ => {}
         }
@@ -170,13 +181,18 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
             bail!("ambiguous: pass either `--http <url>` or `-- <program>`, not both")
         }
         (Some(url), None) => {
-            let auth = match (bearer_env, oauth) {
-                (Some(_), true) => {
-                    bail!("--bearer-env and --oauth are mutually exclusive (pick one auth mode)")
-                }
-                (Some(env), false) => HttpAuth::Bearer { env },
-                (None, true) => HttpAuth::OAuth,
-                (None, false) => HttpAuth::None,
+            // Bearer is mutually exclusive with either OAuth flag (static token vs.
+            // authorization-code grant). `--oauth-interactive` is a superset of
+            // `--oauth` (same reuse path, only the missing-token case differs), so
+            // giving both is redundant-but-harmless and resolves to interactive.
+            if bearer_env.is_some() && (oauth || oauth_interactive) {
+                bail!("--bearer-env and --oauth/--oauth-interactive are mutually exclusive (pick one auth mode)");
+            }
+            let auth = match (bearer_env, oauth_interactive, oauth) {
+                (Some(env), _, _) => HttpAuth::Bearer { env },
+                (None, true, _) => HttpAuth::OAuthInteractive,
+                (None, false, true) => HttpAuth::OAuth,
+                (None, false, false) => HttpAuth::None,
             };
             Ok(Upstream::Http(HttpUpstream { url, auth }))
         }
@@ -186,6 +202,9 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
             }
             if oauth {
                 bail!("--oauth applies to `--http` upstreams, not the stdio `--` form");
+            }
+            if oauth_interactive {
+                bail!("--oauth-interactive applies to `--http` upstreams, not the stdio `--` form");
             }
             let mut after = after.into_iter();
             let Some(program) = after.next() else {
@@ -199,7 +218,7 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
             }))
         }
         (None, None) => bail!(
-            "no upstream selected; usage: toonfmt --http <url> [--bearer-env VAR | --oauth] | toonfmt -- <program> [args...]"
+            "no upstream selected; usage: toonfmt --http <url> [--bearer-env VAR | --oauth | --oauth-interactive] | toonfmt -- <program> [args...]"
         ),
     }
 }
@@ -293,18 +312,41 @@ mod tests {
         assert_eq!(h.auth, HttpAuth::OAuth);
     }
 
-    /// `--bearer-env` and `--oauth` together → error (mutually exclusive).
+    /// `--http <url> --oauth-interactive` → interactive OAuth auth mode.
+    #[test]
+    fn http_url_with_oauth_interactive() {
+        let h = http(&["--http", "https://x.example/mcp", "--oauth-interactive"]);
+        assert_eq!(h.url, "https://x.example/mcp");
+        assert_eq!(h.auth, HttpAuth::OAuthInteractive);
+    }
+
+    /// `--oauth` + `--oauth-interactive` together → interactive (the superset wins,
+    /// not an error — they're the same grant, redundant but harmless).
+    #[test]
+    fn oauth_and_interactive_resolves_to_interactive() {
+        let h = http(&["--http", "https://x", "--oauth", "--oauth-interactive"]);
+        assert_eq!(h.auth, HttpAuth::OAuthInteractive);
+        // Order-independent.
+        let h = http(&["--http", "https://x", "--oauth-interactive", "--oauth"]);
+        assert_eq!(h.auth, HttpAuth::OAuthInteractive);
+    }
+
+    /// `--bearer-env` and either OAuth flag together → error (mutually exclusive).
     #[test]
     fn bearer_and_oauth_mutually_exclusive() {
         assert!(parse(&["--http", "https://x", "--bearer-env", "TOK", "--oauth"]).is_err());
         // Order-independent.
         assert!(parse(&["--http", "https://x", "--oauth", "--bearer-env", "TOK"]).is_err());
+        // --oauth-interactive is an OAuth mode too: also exclusive with bearer.
+        assert!(parse(&["--http", "https://x", "--bearer-env", "TOK", "--oauth-interactive"]).is_err());
+        assert!(parse(&["--http", "https://x", "--oauth-interactive", "--bearer-env", "TOK"]).is_err());
     }
 
-    /// `--oauth` on the stdio form → error.
+    /// `--oauth` / `--oauth-interactive` on the stdio form → error.
     #[test]
     fn oauth_on_stdio_errors() {
         assert!(parse(&["--oauth", "--", "cat"]).is_err());
+        assert!(parse(&["--oauth-interactive", "--", "cat"]).is_err());
     }
 
     /// `--http <url> -- cat` → ambiguous → error.

@@ -149,6 +149,53 @@ where
     Ok(AuthClient::new(reqwest::Client::default(), manager))
 }
 
+/// Build an [`AuthClient`] for the **interactive** serve path (`--oauth-interactive`).
+///
+/// Identical to [`serve_auth_client`] when a usable token is already stored — the
+/// token is loaded and reused, no browser. The only difference is the missing-token
+/// case: instead of failing fast, this runs the full [`login`] authorization-code
+/// flow *inline* (auto-launching the browser via `open_browser`), persists the
+/// freshly minted token, and then builds the client from it.
+///
+/// This is sound only because rmcp requires authorization to complete **before**
+/// `initialize` — the flow finishes here, synchronously, before the transport is
+/// handed to the driver, so by the time `initialize` is sent a valid token exists.
+/// It is gated behind the explicit `--oauth-interactive` opt-in because completing
+/// the flow can block the host's `initialize` on a human at the consent page
+/// (Claude Code tolerates ~30s; B6).
+pub async fn serve_auth_client_interactive<S, B>(
+    url: &str,
+    store: S,
+    open_browser: B,
+) -> Result<AuthClient<reqwest::Client>>
+where
+    S: CredentialStore + 'static,
+    B: FnOnce(&str) -> Result<()>,
+{
+    // Fast path: a stored token → reuse it exactly as the non-interactive serve
+    // path does (load into a store-backed manager so refresh persists). We probe
+    // the store directly rather than catching a fail-fast error so the "already
+    // logged in" case never touches the browser closure.
+    if store
+        .load()
+        .await
+        .map_err(|e| anyhow!("checking for stored OAuth credentials: {e}"))?
+        .is_some()
+    {
+        return serve_auth_client(url, store).await;
+    }
+
+    // No token: run the authorization-code flow inline, persisting to `store`.
+    eprintln!(
+        "toonfmt: no stored OAuth credentials for {url}; launching browser to authorize…"
+    );
+    login(url, &store, open_browser).await?;
+
+    // The token is now persisted; build the serve client from it (store-backed, so
+    // rmcp's auto-refresh continues to persist rotated tokens).
+    serve_auth_client(url, store).await
+}
+
 /// Accept exactly one HTTP request on the loopback listener, parse the OAuth
 /// `code`+`state` from its query string, send a minimal browser-facing response,
 /// and return `(code, state)`.

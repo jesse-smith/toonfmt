@@ -471,25 +471,34 @@ locally** unless the transport's async send/receive ordering forces correlation.
 > viable one(s), discard the rest. Reuses the **same B3 driver** — only the trigger and the
 > user-prompt channel differ. Splitting C out keeps B a complete, deterministic landing slice that
 > the three-way (explicit/stderr/elicitation) exploration can't block.
-- [ ] **C1 — stderr-inline (mcp-remote model).** Serve path with `HttpAuth::OAuth` + no stored
-  token, behind an explicit opt-in (`--oauth-interactive`): call the B3 driver with
-  `browser = open::that`, prompt to **stderr**, complete auth *before* `initialize`. e2e with the
-  test browser closure. **B6 verdict — viable-but-weak, not auto-keep:** Claude Code *does* tolerate
-  a slow `initialize` (30s connect timeout, measured) AND *does* capture stderr — but only into a
-  cache log (`mcp-logs-*`), NOT the visible `/mcp` menu. So an inline stderr prompt would be
-  technically reachable within ~30s yet **invisible to a user not tailing the log** — the auth URL
-  the user must click never shows up where they'd look. Decision deferred to Slice C start: likely
-  **lower priority than C2**, or pivot C1 to "auto-open the browser without needing the user to see a
-  prompt" (the URL launches; nothing to read). Discard only if even the auto-open offers nothing over
-  explicit `login`.
-- [ ] **C2 — elicitation spike.** Investigate prompting the user *through Claude Code* via MCP
-  `elicitation/create` instead of stderr. **Two unknowns to settle first (spike, don't build):**
-  (1) does Claude Code honor elicitation from a *stdio* server at all? (docs unconfirmed);
-  (2) can it fire in time — elicitation is a server→client request presuming an initialized session,
-  but rmcp needs auth *before* `initialize`. If elicitation needs a live session, the only fit is a
-  **lazy** model (let `initialize` succeed, 401 on first `tools/call`, then elicit + auth) — which
-  means driving OAuth **outside** rmcp's `AuthClient` (reopens protocol rmcp otherwise owns). Spike
-  answers both before any build; if either is "no," drop C2. If both "yes," C2 supersedes C1.
+- [x] **C1 — interactive auto-open OAuth at serve time (KEPT).** Pivoted from the stderr-prompt
+  model to **silent auto-open** per the B6 verdict (an inline stderr prompt lands in a cache log the
+  user isn't tailing, not the `/mcp` menu — so a prompt to *read* is the wrong UX; auto-launching the
+  browser gives the user nothing to read). New `HttpAuth::OAuthInteractive` (gated behind explicit
+  `--oauth-interactive`, a superset of `--oauth`: identical token-reuse path, differing only in the
+  missing-token case). `oauth::serve_auth_client_interactive` probes the store, and on a miss runs the
+  **same B3 `login` driver** inline (auto-opening the browser via `open_in_browser_logged`, which also
+  echoes the auth URL to stderr → recoverable from the B6 cache log) and completes auth *before*
+  `initialize` — sound precisely because rmcp requires auth-before-initialize. e2e
+  `interactive_oauth_serve_logs_in_then_reuses` (no separate `login`): first `--oauth-interactive`
+  serve against an empty HOME mints the token headlessly + returns TOON; second reuses it with the
+  browser cmd set to `false` (would diverge if invoked). Gates: 74 tests green, clippy
+  `-D warnings` clean. (Also fixed a latent `TempHome` uniqueness bug — address-of-local stamp
+  collided across concurrent tests — now a process-wide atomic counter.)
+- [x] **C2 — elicitation spike (DISCARDED).** Settled by spike, not built. The plan's **lazy model is
+  factually impossible** on three independent grounds: (1) the OAuth **401 hits `initialize` itself**,
+  not just `tools/call` — the whole HTTP MCP endpoint is token-protected (MCP spec maintainers via
+  DeepWiki; our own stub 401s every POST at `http_mcp_stub.py:345`; Cloudflare `/mcp` → 401 bare), so
+  there is **no** post-initialize-pre-auth window for "let initialize succeed → 401 later → elicit";
+  (2) rmcp's `AuthClient` returns `AuthorizationRequired` on a 401 and **never starts a flow**
+  (maintainers), so the lazy path would require driving OAuth *outside* `AuthClient`, reopening
+  protocol rmcp owns; (3) **bootstrap circularity** — to send `elicitation/create` toonfmt must first
+  answer Claude Code's `initialize` on the client leg (server→client requests presume an initialized
+  session), but as a passthrough toonfmt proxies `initialize` to the upstream and can't produce that
+  response without a token; synthesizing its own handshake to break the loop desyncs advertised
+  capabilities (a passthrough violation). Unknown #1 (does Claude Code honor stdio elicitation) is
+  therefore **moot** — even a "yes" can't fix the timing. C1's auto-open is the right convenience
+  layer: it fits rmcp's model exactly (auth-before-initialize, just auto-triggered).
 - [ ] **C3 — docs + accept.** Record the keep/discard verdict for each channel in `ARCHITECTURE.md`
   + memory; cairn-accept Slice C.
 

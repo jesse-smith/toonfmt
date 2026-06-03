@@ -73,9 +73,17 @@ async fn spawn_oauth_stub() -> (Child, u16) {
 struct TempHome(PathBuf);
 impl TempHome {
     fn new() -> Self {
-        // Process id + a nanosecond-free unique-ish suffix from the address of a
-        // local — enough to avoid collisions across concurrent tests in one binary.
-        let stamp = format!("{}-{:p}", std::process::id(), &0u8 as *const u8);
+        // Process id + a process-wide atomic counter: unique per call even across
+        // tests running concurrently in one binary. (An earlier address-of-a-local
+        // trick collided — two threads got the same stack address — which let two
+        // tests share a HOME and double-count credential files.)
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let stamp = format!(
+            "{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
         let p = std::env::temp_dir().join(format!("toonfmt-oauth-e2e-{stamp}"));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).expect("create temp HOME");
@@ -218,6 +226,68 @@ async fn serve_oauth_one_call(url: &str, home: &TempHome) -> Value {
     out
 }
 
+/// Drive a `serve --oauth-interactive` session through the handshake + one
+/// `probe_content_only` `tools/call`, returning that response. `browser_cmd` is set
+/// as `TOONFMT_BROWSER_CMD`: pass the headless browser to exercise the inline login
+/// (no token yet), or `"false"` to PROVE a second run reuses the cached token (the
+/// closure would exit nonzero if ever invoked).
+async fn serve_oauth_interactive_one_call(url: &str, home: &TempHome, browser_cmd: &str) -> Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_toonfmt"))
+        .args(["--http", url, "--oauth-interactive"])
+        .env("HOME", home.path())
+        .env("TOONFMT_BROWSER_CMD", browser_cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn toonfmt --http --oauth-interactive");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    // (1) initialize — for the no-token case this only returns AFTER the inline
+    // authorization-code flow completes, so the headless browser must have run.
+    stdin
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\
+              \"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\
+              \"clientInfo\":{\"name\":\"oauth-interactive-e2e\",\"version\":\"0.0.0\"}}}\n",
+        )
+        .await
+        .unwrap();
+    stdin.flush().await.unwrap();
+    let init = read_responses(&mut stdout, &[1]).await;
+    assert_eq!(
+        init[&1]["result"]["protocolVersion"], "2025-03-26",
+        "initialize must complete over the interactive OAuth serve path"
+    );
+
+    // (2) initialized, then one tools/call.
+    stdin
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+        .await
+        .unwrap();
+    stdin
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\
+              \"params\":{\"name\":\"probe_content_only\",\"arguments\":{}}}\n",
+        )
+        .await
+        .unwrap();
+    stdin.flush().await.unwrap();
+
+    let resp = read_responses(&mut stdout, &[2]).await;
+    let out = resp[&2].clone();
+
+    drop(stdin);
+    let mut leftover = String::new();
+    let _ =
+        tokio::time::timeout(Duration::from_secs(5), stdout.read_to_string(&mut leftover)).await;
+    let _ = child.wait().await;
+    out
+}
+
 /// Assert a `tools/call` response's content block is TOON (no longer JSON-parseable)
 /// and still carries the payload sentinel.
 fn assert_toon(resp: &Value) {
@@ -288,6 +358,64 @@ async fn explicit_oauth_login_persist_serve_toon_reuse() {
     // launch a nonzero-exit divergence; a clean TOON result proves reuse with no
     // re-auth hop.
     let resp2 = serve_oauth_one_call(&url, &home).await;
+    assert_toon(&resp2);
+
+    stub.kill().await.ok();
+}
+
+/// Slice C / C1: the **interactive** serve path runs the authorization-code flow
+/// inline when no token is stored (auto-launching the browser), completes it before
+/// `initialize`, and returns TOON — then a second interactive serve reuses the
+/// cached token without touching the browser.
+///
+/// This is C1's keeper proof: it never calls `login` separately. The first
+/// `--oauth-interactive` serve, against a fresh (empty) HOME, must itself drive the
+/// browser closure to mint the token; the second must NOT (its browser cmd is
+/// `false`, which would diverge if invoked).
+#[tokio::test]
+async fn interactive_oauth_serve_logs_in_then_reuses() {
+    if !have_python3() {
+        eprintln!("SKIP oauth_e2e: python3 not available on PATH");
+        return;
+    }
+
+    let (mut stub, port) = spawn_oauth_stub().await;
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let home = TempHome::new();
+
+    // Sanity: no token stored yet — the interactive serve must mint one itself.
+    assert!(
+        !home.auth_dir().exists(),
+        "fresh HOME must have no credential store before interactive serve"
+    );
+
+    // --- (1) first interactive serve with NO token: runs the inline flow headlessly,
+    // completes auth before initialize, returns TOON ---
+    let headless = format!(
+        "python3 {}/tests/fixtures/headless_browser.py",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let resp = serve_oauth_interactive_one_call(&url, &home, &headless).await;
+    assert_toon(&resp);
+
+    // The inline flow persisted exactly one credential file (same store the
+    // explicit `login` path writes).
+    let files: Vec<_> = std::fs::read_dir(home.auth_dir())
+        .expect("credential dir should exist after interactive login")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+        .collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "interactive serve should persist exactly one credential file, found: {files:?}"
+    );
+
+    // --- (2) second interactive serve REUSES the token: browser cmd is `false`, so
+    // any login attempt would exit nonzero and the flow would diverge. A clean TOON
+    // result proves the stored token was loaded without re-auth. ---
+    let resp2 = serve_oauth_interactive_one_call(&url, &home, "false").await;
     assert_toon(&resp2);
 
     stub.kill().await.ok();
