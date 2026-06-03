@@ -18,6 +18,33 @@
 
 use anyhow::{Result, bail};
 
+/// Canonical usage text for the `--help` front door.
+///
+/// **Additive (Fork C):** the scattered contextual `bail!` diagnostics elsewhere
+/// in this module stay exactly as they read — they are fail-fast specifics
+/// ("`--bearer-env` applies to `--http` upstreams…"), not generic usage fragments.
+/// This block is the one canonical thing `--help` prints; it does not replace them.
+pub const USAGE: &str = "\
+toonfmt — a transparent MCP stdio proxy that reshapes tool-result JSON to TOON.
+
+USAGE:
+    toonfmt [flags] -- <program> [args...]    serve a stdio upstream
+    toonfmt --http <url> [auth]               serve an HTTP (Streamable HTTP) upstream
+    toonfmt login --http <url>                run the OAuth flow once, persist tokens
+    toonfmt update                            self-update an installer-based build
+    toonfmt --help | --version
+
+AUTH (HTTP upstreams only):
+    --bearer-env <VAR>     static bearer token, read from environment variable <VAR>
+    --oauth                use tokens from a prior `toonfmt login` (fail-fast if absent)
+    --oauth-interactive    like --oauth, but run the browser flow at serve time if absent
+
+OPTIONS:
+    -h, --help             print this help and exit
+    -V, --version          print version and exit
+
+Everything after `--` is the upstream program and its argv, forwarded byte-verbatim.";
+
 /// The upstream MCP server command to spawn (stdio transport).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpstreamCmd {
@@ -96,6 +123,28 @@ pub enum Command {
     Login(LoginArgs),
     /// `toonfmt update`: self-update via the install receipt. Takes no arguments.
     Update,
+    /// `--help` / `-h` / `help`: print [`USAGE`] to stdout and exit 0.
+    Help,
+    /// `--version` / `-V`: print the crate version to stdout and exit 0.
+    Version,
+}
+
+/// Is `tok` a meta *flag* (`--help`/`-h`/`--version`/`-V`)?
+///
+/// Recognized **only among pre-`--` tokens** (Gap E): everything after `--` is
+/// the upstream program's argv and is forwarded verbatim, so this is never
+/// consulted past the separator. Each parse loop calls this at the top of its
+/// iteration, *before* matching value-taking flags — so a value already consumed
+/// by the parser (e.g. the `<VAR>` of `--bearer-env <VAR>`) is never re-examined
+/// and can't be misread as a meta flag. The bare word `help` is handled
+/// separately as a first-token subcommand (it isn't a flag and would collide with
+/// a legitimate flag value if matched anywhere).
+fn meta_command(tok: &str) -> Option<Command> {
+    match tok {
+        "--help" | "-h" => Some(Command::Help),
+        "--version" | "-V" => Some(Command::Version),
+        _ => None,
+    }
 }
 
 /// Parse process arguments (excluding argv[0]) into a [`Command`].
@@ -115,30 +164,43 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Command> {
     // Subcommands are distinguished by the first token. Everything else is the
     // implicit `serve` command.
     match it.peek().map(String::as_str) {
+        // Bare `help` as the leading word → Help. (Only here, not in
+        // `meta_command`, so it can't shadow a legitimate flag value downstream.)
+        Some("help") => return Ok(Command::Help),
         Some("login") => {
             it.next(); // consume `login`
-            return parse_login(it).map(Command::Login);
+            return parse_login(it);
         }
         Some("update") => {
             it.next(); // consume `update`
-            // `update` takes no arguments — anything trailing is a usage error.
-            if let Some(extra) = it.next() {
-                bail!("unexpected argument to `update`: {extra} (usage: toonfmt update)");
-            }
-            return Ok(Command::Update);
+            // `update` takes no arguments, but `--help`/`-h` pre-empts that
+            // validation (a trailing meta flag prints help rather than erroring).
+            return match it.next() {
+                Some(tok) => match meta_command(&tok) {
+                    Some(meta) => Ok(meta),
+                    None => {
+                        bail!("unexpected argument to `update`: {tok} (usage: toonfmt update)")
+                    }
+                },
+                None => Ok(Command::Update),
+            };
         }
         _ => {}
     }
 
-    parse_serve(it).map(Command::Serve)
+    parse_serve(it)
 }
 
 /// Parse `login --http <url>`. Only `--http` is accepted — login *is* the OAuth
-/// flow, so no auth selector is needed (or allowed).
-fn parse_login(args: impl Iterator<Item = String>) -> Result<LoginArgs> {
+/// flow, so no auth selector is needed (or allowed). `--help`/`-h` anywhere here
+/// pre-empts validation and yields [`Command::Help`].
+fn parse_login(args: impl Iterator<Item = String>) -> Result<Command> {
     let mut url: Option<String> = None;
     let mut it = args;
     while let Some(arg) = it.next() {
+        if let Some(meta) = meta_command(&arg) {
+            return Ok(meta);
+        }
         match arg.as_str() {
             "--http" => {
                 let Some(u) = it.next() else {
@@ -150,13 +212,14 @@ fn parse_login(args: impl Iterator<Item = String>) -> Result<LoginArgs> {
         }
     }
     match url {
-        Some(url) => Ok(LoginArgs { url }),
+        Some(url) => Ok(Command::Login(LoginArgs { url })),
         None => bail!("login requires an upstream; usage: toonfmt login --http <url>"),
     }
 }
 
-/// Parse the serve forms (HTTP or stdio).
-fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
+/// Parse the serve forms (HTTP or stdio). May instead return a meta
+/// [`Command::Help`]/[`Command::Version`] if such a flag appears pre-`--`.
+fn parse_serve(args: impl Iterator<Item = String>) -> Result<Command> {
     let mut http_url: Option<String> = None;
     let mut bearer_env: Option<String> = None;
     let mut oauth = false;
@@ -166,9 +229,14 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
     let mut it = args;
     while let Some(arg) = it.next() {
         if let Some(rest) = after_sep.as_mut() {
-            // Already past `--`: collect the rest verbatim.
+            // Already past `--`: collect the rest verbatim. Meta flags here belong
+            // to the upstream argv (Gap E) — never inspected.
             rest.push(arg);
             continue;
+        }
+        // Pre-`--` meta flags pre-empt the whole serve spec (Gap E: pre-`--` only).
+        if let Some(meta) = meta_command(&arg) {
+            return Ok(meta);
         }
         match arg.as_str() {
             "--" => after_sep = Some(Vec::new()),
@@ -209,7 +277,7 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
                 (None, false, true) => HttpAuth::OAuth,
                 (None, false, false) => HttpAuth::None,
             };
-            Ok(Upstream::Http(HttpUpstream { url, auth }))
+            Ok(Command::Serve(Upstream::Http(HttpUpstream { url, auth })))
         }
         (None, Some(after)) => {
             if bearer_env.is_some() {
@@ -227,10 +295,10 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
                     "no upstream command after `--`; usage: toonfmt [flags] -- <program> [args...]"
                 );
             };
-            Ok(Upstream::Stdio(UpstreamCmd {
+            Ok(Command::Serve(Upstream::Stdio(UpstreamCmd {
                 program,
                 args: after.collect(),
-            }))
+            })))
         }
         (None, None) => bail!(
             "no upstream selected; usage: toonfmt --http <url> [--bearer-env VAR | --oauth | --oauth-interactive] | toonfmt -- <program> [args...]"
@@ -407,6 +475,63 @@ mod tests {
     fn login_rejects_stray_args() {
         assert!(parse(&["login", "--http", "https://x", "--bearer-env", "TOK"]).is_err());
         assert!(parse(&["login", "--", "cat"]).is_err());
+    }
+
+    // --- help / version (H1) ---
+
+    /// `--help` / `-h` → Help (anywhere among pre-`--` tokens).
+    #[test]
+    fn help_flag_long_and_short() {
+        assert_eq!(parse(&["--help"]).unwrap(), Command::Help);
+        assert_eq!(parse(&["-h"]).unwrap(), Command::Help);
+    }
+
+    /// Bare `help` first token → Help (subcommand-position word).
+    #[test]
+    fn help_bare_word() {
+        assert_eq!(parse(&["help"]).unwrap(), Command::Help);
+    }
+
+    /// `--version` / `-V` → Version.
+    #[test]
+    fn version_flag_long_and_short() {
+        assert_eq!(parse(&["--version"]).unwrap(), Command::Version);
+        assert_eq!(parse(&["-V"]).unwrap(), Command::Version);
+    }
+
+    /// Meta flags pre-empt even a full, otherwise-valid upstream spec — they win
+    /// among any pre-`--` tokens.
+    #[test]
+    fn meta_flags_win_among_other_pre_sep_args() {
+        assert_eq!(
+            parse(&["--http", "https://x", "--oauth", "--help"]).unwrap(),
+            Command::Help
+        );
+        assert_eq!(
+            parse(&["--version", "--http", "https://x"]).unwrap(),
+            Command::Version
+        );
+    }
+
+    /// Gap E — passthrough fidelity: a meta flag *after* `--` belongs to the
+    /// upstream program's argv, never to toonfmt.
+    #[test]
+    fn meta_flags_after_separator_pass_through_to_upstream() {
+        let cmd = stdio(&["--", "echo", "--help"]);
+        assert_eq!(cmd.program, "echo");
+        assert_eq!(cmd.args, vec!["--help"]);
+
+        let cmd = stdio(&["--", "echo", "--version"]);
+        assert_eq!(cmd.program, "echo");
+        assert_eq!(cmd.args, vec!["--version"]);
+    }
+
+    /// Subcommands honor `--help`: it pre-empts their own arg validation, so
+    /// `login --help` does not error on the missing URL.
+    #[test]
+    fn subcommands_honor_help() {
+        assert_eq!(parse(&["login", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse(&["update", "--help"]).unwrap(), Command::Help);
     }
 
     // --- update subcommand ---

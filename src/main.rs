@@ -58,6 +58,17 @@ async fn run() -> Result<ExitCode> {
                 .context("update task panicked")?
                 .map(|()| ExitCode::SUCCESS)
         }
+        // Meta commands: print to stdout (the human front door, not the protocol
+        // channel — but help/version never coexist with a serve session, so stdout
+        // is correct and conventional here) and exit 0.
+        Command::Help => {
+            println!("{}", cli::USAGE);
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Version => {
+            println!("toonfmt {}", env!("CARGO_PKG_VERSION"));
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
