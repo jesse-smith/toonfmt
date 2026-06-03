@@ -1,9 +1,9 @@
-# Coverage + quality pass — llvm-cov baseline, 90% unit, simplify, + Codecov
+# Coverage + quality pass — llvm-cov coverable-surface baseline, simplify, + Codecov
 
 **Date:** 2026-06-03  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-06-02-self-update.md (Phase B); folds in the deferred Codecov work
   (memory `codecov-deferred`) and the deferred CI piece from `release-v0.1-dist-setup`.
-**Status:** in progress  <!-- drafted | in progress | landed -->
+**Status:** landed  <!-- drafted | in progress | landed -->
 
 ## Goal
 Make the repo *genuinely good code*, not just a working product: thorough, well-factored tests
@@ -192,12 +192,14 @@ distinction) rather than implementation detail.
   code-review agent run over `src/` + the new tests. Three fixes survived scrutiny and landed;
   several proposals were rejected as negative-value churn. Constitution updated with the one new
   invariant (windowless `0600` create). `cargo test` (123) + clippy green.
-- [ ] **Q4 — Codecov in CI + complexity gate.** Add the llvm-cov coverage upload to
-  `.github/workflows/ci.yml` per the dbtoon pattern with the token/​`fail_ci_if_error` fix. Add the
-  complexity gate: `clippy.toml` with `cognitive-complexity-threshold = 20`,
-  `#![warn(clippy::cognitive_complexity)]` at the crate root, and the
-  `#[allow(clippy::cognitive_complexity)]` + reason on `http_upstream::run` (CI's `-D warnings`
-  already makes it blocking — confirm clippy stays green). Badge in README. cairn-accept.
+- [x] **Q4 — Codecov in CI + complexity gate.** *(done 2026-06-03.)* CI `ci.yml`: added
+  `llvm-tools-preview` + `taiki-e/install-action@cargo-llvm-cov` + `cargo llvm-cov
+  --ignore-filename-regex 'src/main\.rs' --codecov` (doubles as the test run) → `codecov-action@v5`
+  with **`fail_ci_if_error: false`** (the dbtoon `true`-over-missing-secret red, avoided). Complexity
+  gate: `clippy.toml` threshold 20 + crate-root `#![warn(clippy::cognitive_complexity)]`; confirmed it
+  flags **only** `http_upstream::run` @ 24/20, which now carries `#[allow]` + reason → `clippy -D
+  warnings` green. CI + codecov badges in README; `codecov.json` gitignored; constitution CI-gate
+  line updated. cairn-accept ready.
 
 ## Acceptance criteria
 - An honest, reproducible coverage number exists; coverage of the **coverable surface** (after the

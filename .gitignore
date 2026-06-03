@@ -4,6 +4,9 @@
 # Added by cargo
 /target
 
+# Coverage report artifact (cargo-llvm-cov --codecov output; regenerated in CI)
+/codecov.json
+
 # Tooling state (machine-local)
 .serena/
 .claude/settings.local.json
