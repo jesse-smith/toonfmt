@@ -147,6 +147,36 @@ bucket-(C) gaps, all green (`cargo test`: 121 total, 0 fail). No filler — each
   `parse_json_or_json5` is encodable, so this is belt-and-suspenders), `http_upstream.rs:184`
   (`tx.send` err = receiver-gone-mid-shutdown race). Kept as cheap guards; flagged for Q3 to judge.
 
+## Q3 results (2026-06-03)
+Two agents over `src/` + the Q2 tests: `code-simplifier` (clarity/dedup) and a high-effort
+code-review (correctness/security/test-quality), both armed with the constitution's protected
+invariants. **Three changes survived scrutiny and landed; the rest were rejected as churn.**
+
+**Landed:**
+1. **`credential_store.rs` — dedup the SHA-256 hex loop.** `url_hash` and `key_hash`'s profile arm
+   held byte-identical `finalize → hex` loops; extracted `hex_digest(Sha256)`. This is duplicated
+   *knowledge* (the golden-pinned stem format), so DRY wins over Rule-of-Three here. Golden tests
+   prove byte-faithfulness.
+2. **`credential_store.rs` — TOCTOU fix (MAJOR, security).** `save` used `tokio::fs::write` (creates
+   `0644`) then chmod `0600` — a real world-readable window for the token on multi-user hosts. New
+   `write_private` opens with mode `0600` via `open(2)` so the file is private from creation; no
+   post-write chmod. Recorded as a **don't-revert invariant** in the constitution. New test asserts
+   the overwrite (rotation) path also stays `0600` (the subtle `mode`-only-on-create case).
+3. **`update.rs` — tighten `is_no_receipt_msg` (MINOR, correctness).** The matcher had a bare
+   `contains("no")` arm that matches incidental "no" inside `not`/`node`/`diagnostic`/… — a real
+   failure mentioning "receipt" could be misrouted into the swallowed no-receipt (`Ok`) path.
+   Narrowed to `"no receipt"`; the `"unable to load"` arm already covers axoupdater 0.10.0's actual
+   wording. Added a negative-boundary test.
+
+**Rejected (recorded so they aren't re-proposed):** collapsing the two OAuth match arms in
+`main.rs` (Rule of Three — appears twice, shallow/incidental duplication, the parallel arms read
+clearer); flattening the `forward_to_client` method-extraction chain (diagnostic-only path, current
+form is explicit per the "explicit over compact" preference); the `read_request_target` O(n²) CRLF
+scan (bounded at 8 KiB on loopback — negligible). The review also **verified non-issues**: OAuth
+callback parsing never panics on peer bytes; the drain `pending_count` accounting is leak-free; the
+new tests assert intent (the big-id correlation-key test, the corrupt-file vs. missing-file
+distinction) rather than implementation detail.
+
 ## Tasks
 - [x] **Q1 — Baseline + exclusion list + decisions.** *(done 2026-06-03 — see "Q1 results" above.)*
   Blended baseline 92.04%; exclusion list resolved to **`src/main\.rs` only** (the other candidates
@@ -158,9 +188,10 @@ bucket-(C) gaps, all green (`cargo test`: 121 total, 0 fail). No filler — each
   defensive guards) — enumerated above. ~100% of the *cheaply* coverable surface is now covered; the
   rest needs stub work (deferred) or asserting implementation mechanics (declined). `cargo test`
   (121) + `cargo clippy --all-targets -- -D warnings` green.
-- [ ] **Q3 — Simplify pass.** Run `/simplify` and `/code-review` (high effort) over the tree;
-  apply design/clarity fixes that survive scrutiny. This is the "stress-test the implementation"
-  step — record any decision that *should not* change and why (so it isn't re-relitigated).
+- [x] **Q3 — Simplify pass.** *(done 2026-06-03 — see "Q3 results".)* code-simplifier + a high-effort
+  code-review agent run over `src/` + the new tests. Three fixes survived scrutiny and landed;
+  several proposals were rejected as negative-value churn. Constitution updated with the one new
+  invariant (windowless `0600` create). `cargo test` (123) + clippy green.
 - [ ] **Q4 — Codecov in CI + complexity gate.** Add the llvm-cov coverage upload to
   `.github/workflows/ci.yml` per the dbtoon pattern with the token/​`fail_ci_if_error` fix. Add the
   complexity gate: `clippy.toml` with `cognitive-complexity-threshold = 20`,

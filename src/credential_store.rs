@@ -14,7 +14,11 @@
 //!
 //! **Permissions:** the token file is `0600` and the base directory `0700` (unix).
 //! A bearer/refresh token is a credential; world- or group-readable storage would
-//! be a leak. Enforced on every save, not just creation.
+//! be a leak. The file is created `0600` *before* the secret bytes are written (via
+//! `open(2)` mode, not a post-write chmod) so there is **no world-readable window**
+//! — see `write_private`. The directory perms are tightened separately as
+//! defense-in-depth (they hide which upstreams exist; the token's own guard is the
+//! file mode).
 //!
 //! **Injectable base dir:** [`FileCredentialStore::new`] takes the base directory so
 //! tests drive a throwaway path; [`FileCredentialStore::for_url`] resolves the
@@ -65,17 +69,25 @@ impl FileCredentialStore {
     }
 }
 
+/// Finalize a SHA-256 hasher to its 64-char lowercase-hex digest — the filename
+/// stem format. Single definition because the format is load-bearing (pinned by the
+/// frozen-golden tests) and shared by both `url_hash` and the profile arm of
+/// `key_hash`; one source of truth means the two paths can't silently drift.
+fn hex_digest(hasher: Sha256) -> String {
+    use std::fmt::Write;
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 /// SHA-256 hex digest of the upstream URL — the per-URL filename stem.
 fn url_hash(url: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(url.as_bytes());
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    hex_digest(hasher)
 }
 
 /// The credential-file stem for `(profile, url)` — branch on the `Option`, do
@@ -98,13 +110,7 @@ fn key_hash(profile: Option<&str>, url: &str) -> String {
             hasher.update(p.as_bytes());
             hasher.update([0u8]);
             hasher.update(url.as_bytes());
-            let digest = hasher.finalize();
-            let mut hex = String::with_capacity(digest.len() * 2);
-            for byte in digest {
-                use std::fmt::Write;
-                let _ = write!(hex, "{byte:02x}");
-            }
-            hex
+            hex_digest(hasher)
         }
     }
 }
@@ -142,13 +148,15 @@ impl CredentialStore for FileCredentialStore {
 
         let json = serde_json::to_vec_pretty(&credentials)
             .map_err(|e| io_err("serializing credentials", e))?;
-        tokio::fs::write(&self.path, &json)
+        // Write 0600 with NO readable window: the file is created/chmodded to 0600
+        // *before* the token bytes are written, not after (see `write_private`). The
+        // base dir's own perms are tightened above; even during the sub-ms before
+        // that chmod lands on a fresh dir, the token file inside is already 0600, so
+        // the secret is never group/world-readable — the dir perms are
+        // defense-in-depth (hiding which URLs exist), not the token's guard.
+        write_private(&self.path, &json)
             .await
             .map_err(|e| io_err("writing credential file", e))?;
-        #[cfg(unix)]
-        set_mode(&self.path, 0o600)
-            .await
-            .map_err(|e| io_err("locking down credential file perms", e))?;
         Ok(())
     }
 
@@ -165,6 +173,37 @@ impl CredentialStore for FileCredentialStore {
 async fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await
+}
+
+/// Write `bytes` to `path`, truncating any existing file, with the file private
+/// (`0600`) from the instant it exists — no world-readable window.
+///
+/// `tokio::fs::write` opens with `0666 & ~umask` (typically 0644) and would leave
+/// the token group/world-readable until a follow-up chmod; on a multi-user host
+/// that race is a real leak. Instead we pass the mode to `open(2)` via
+/// `OpenOptionsExt::mode`, so the file is created 0600 *before* the secret lands.
+/// `mode` applies only on creation; an existing file keeps its perms, but a prior
+/// `save` already created it 0600, so the invariant holds across overwrites.
+#[cfg(unix)]
+async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    // `mode` is an inherent method on tokio's unix `OpenOptions` — no std ext trait.
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .await?;
+    file.write_all(bytes).await?;
+    file.flush().await
+}
+
+/// Non-unix fallback: no POSIX mode bits, so this is a plain write (matches the
+/// pre-existing behavior — perms hardening was always `#[cfg(unix)]`).
+#[cfg(not(unix))]
+async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    tokio::fs::write(path, bytes).await
 }
 
 #[cfg(test)]
@@ -258,6 +297,13 @@ mod tests {
 
         let dir_mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "store directory must be private (0700)");
+
+        // Overwrite path: a second save (token rotation) must KEEP 0600. `mode` on
+        // OpenOptions applies only at creation, so this guards the subtle case the
+        // TOCTOU fix relies on — re-saving an existing file doesn't widen its perms.
+        store.save(creds("rotated")).await.unwrap();
+        let file_mode = std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(file_mode, 0o600, "credential file must stay 0600 across re-save");
     }
 
     #[tokio::test]
