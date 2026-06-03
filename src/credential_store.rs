@@ -260,6 +260,51 @@ mod tests {
         assert_eq!(dir_mode, 0o700, "store directory must be private (0700)");
     }
 
+    #[tokio::test]
+    async fn corrupt_credential_file_surfaces_an_error() {
+        // A garbled credential file must fail loudly (InternalError), not silently
+        // load as None (which would masquerade as "not logged in" and trigger a
+        // spurious re-auth) and not panic. This exercises the parse-error arm and the
+        // `io_err` mapper.
+        let tmp = TempDir::new("corrupt");
+        let store = FileCredentialStore::new(tmp.path(), "https://x.example/mcp", None);
+        store.save(creds("c")).await.unwrap(); // create the dir + a real file first
+        tokio::fs::write(store.path(), b"{ this is not valid json")
+            .await
+            .unwrap();
+
+        let err = store.load().await.expect_err("corrupt file must error");
+        let AuthError::InternalError(msg) = err else {
+            panic!("expected InternalError, got {err:?}");
+        };
+        assert!(
+            msg.contains("parsing stored credentials"),
+            "error should name the failing operation, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_into_unwritable_location_errors() {
+        // base_dir whose parent is a regular file → create_dir_all fails. save() must
+        // surface that as InternalError naming the operation, not panic. Covers the
+        // dir-creation error arm + io_err on the save path.
+        let tmp = TempDir::new("unwritable");
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        let blocker = tmp.path().join("iam-a-file");
+        std::fs::write(&blocker, b"x").unwrap();
+        // base_dir is *under* a regular file — create_dir_all cannot succeed.
+        let store = FileCredentialStore::new(blocker.join("nested"), "https://x.example/mcp", None);
+
+        let err = store.save(creds("c")).await.expect_err("save must error");
+        let AuthError::InternalError(msg) = err else {
+            panic!("expected InternalError, got {err:?}");
+        };
+        assert!(
+            msg.contains("store directory"),
+            "error should name the dir-creation step, got: {msg}"
+        );
+    }
+
     #[test]
     fn url_hash_is_stable_and_hex() {
         let h = url_hash("https://x.example/mcp");
