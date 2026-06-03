@@ -18,6 +18,35 @@
 
 use anyhow::{Result, bail};
 
+/// Canonical usage text for the `--help` front door.
+///
+/// **Additive (Fork C):** the scattered contextual `bail!` diagnostics elsewhere
+/// in this module stay exactly as they read — they are fail-fast specifics
+/// ("`--bearer-env` applies to `--http` upstreams…"), not generic usage fragments.
+/// This block is the one canonical thing `--help` prints; it does not replace them.
+pub const USAGE: &str = "\
+toonfmt — a transparent MCP stdio proxy that reshapes tool-result JSON to TOON.
+
+USAGE:
+    toonfmt [flags] -- <program> [args...]    serve a stdio upstream
+    toonfmt --http <url> [auth]               serve an HTTP (Streamable HTTP) upstream
+    toonfmt login --http <url>                run the OAuth flow once, persist tokens
+    toonfmt update                            self-update an installer-based build
+    toonfmt --help | --version
+
+AUTH (HTTP upstreams only):
+    --bearer-env <VAR>     static bearer token, read from environment variable <VAR>
+    --oauth                use tokens from a prior `toonfmt login` (fail-fast if absent)
+    --oauth-interactive    like --oauth, but run the browser flow at serve time if absent
+    --profile <name>       namespace OAuth credentials (must match on login + serve);
+                           use --profile ${CLAUDE_PROJECT_DIR} for project-scoped tokens
+
+OPTIONS:
+    -h, --help             print this help and exit
+    -V, --version          print version and exit
+
+Everything after `--` is the upstream program and its argv, forwarded byte-verbatim.";
+
 /// The upstream MCP server command to spawn (stdio transport).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpstreamCmd {
@@ -52,6 +81,13 @@ pub enum HttpAuth {
 pub struct HttpUpstream {
     pub url: String,
     pub auth: HttpAuth,
+    /// Optional credential-store namespace (Fork A — part of the connection
+    /// identity, parallel to `url`). `None` = the shared default key
+    /// `sha256(url)`; `Some(p)` keys the store by `sha256(p ⊕ "\0" ⊕ url)`, so
+    /// distinct identities for one URL coexist. Only the OAuth auth modes read the
+    /// store, so a `Some` here with non-OAuth auth is rejected at parse time
+    /// (Fork B) — the field is never a silent dead value.
+    pub profile: Option<String>,
 }
 
 impl HttpUpstream {
@@ -86,6 +122,10 @@ pub enum Upstream {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginArgs {
     pub url: String,
+    /// Credential-store namespace — must match the `--profile` used on the serve
+    /// path (extends the URL-match gotcha to "URL **and** profile"). `None` =
+    /// shared default. See [`HttpUpstream::profile`].
+    pub profile: Option<String>,
 }
 
 /// Top-level command. `serve` is the default (no subcommand); `login` runs the
@@ -96,6 +136,28 @@ pub enum Command {
     Login(LoginArgs),
     /// `toonfmt update`: self-update via the install receipt. Takes no arguments.
     Update,
+    /// `--help` / `-h` / `help`: print [`USAGE`] to stdout and exit 0.
+    Help,
+    /// `--version` / `-V`: print the crate version to stdout and exit 0.
+    Version,
+}
+
+/// Is `tok` a meta *flag* (`--help`/`-h`/`--version`/`-V`)?
+///
+/// Recognized **only among pre-`--` tokens** (Gap E): everything after `--` is
+/// the upstream program's argv and is forwarded verbatim, so this is never
+/// consulted past the separator. Each parse loop calls this at the top of its
+/// iteration, *before* matching value-taking flags — so a value already consumed
+/// by the parser (e.g. the `<VAR>` of `--bearer-env <VAR>`) is never re-examined
+/// and can't be misread as a meta flag. The bare word `help` is handled
+/// separately as a first-token subcommand (it isn't a flag and would collide with
+/// a legitimate flag value if matched anywhere).
+fn meta_command(tok: &str) -> Option<Command> {
+    match tok {
+        "--help" | "-h" => Some(Command::Help),
+        "--version" | "-V" => Some(Command::Version),
+        _ => None,
+    }
 }
 
 /// Parse process arguments (excluding argv[0]) into a [`Command`].
@@ -115,30 +177,44 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Command> {
     // Subcommands are distinguished by the first token. Everything else is the
     // implicit `serve` command.
     match it.peek().map(String::as_str) {
+        // Bare `help` as the leading word → Help. (Only here, not in
+        // `meta_command`, so it can't shadow a legitimate flag value downstream.)
+        Some("help") => return Ok(Command::Help),
         Some("login") => {
             it.next(); // consume `login`
-            return parse_login(it).map(Command::Login);
+            return parse_login(it);
         }
         Some("update") => {
             it.next(); // consume `update`
-            // `update` takes no arguments — anything trailing is a usage error.
-            if let Some(extra) = it.next() {
-                bail!("unexpected argument to `update`: {extra} (usage: toonfmt update)");
-            }
-            return Ok(Command::Update);
+            // `update` takes no arguments, but `--help`/`-h` pre-empts that
+            // validation (a trailing meta flag prints help rather than erroring).
+            return match it.next() {
+                Some(tok) => match meta_command(&tok) {
+                    Some(meta) => Ok(meta),
+                    None => {
+                        bail!("unexpected argument to `update`: {tok} (usage: toonfmt update)")
+                    }
+                },
+                None => Ok(Command::Update),
+            };
         }
         _ => {}
     }
 
-    parse_serve(it).map(Command::Serve)
+    parse_serve(it)
 }
 
 /// Parse `login --http <url>`. Only `--http` is accepted — login *is* the OAuth
-/// flow, so no auth selector is needed (or allowed).
-fn parse_login(args: impl Iterator<Item = String>) -> Result<LoginArgs> {
+/// flow, so no auth selector is needed (or allowed). `--help`/`-h` anywhere here
+/// pre-empts validation and yields [`Command::Help`].
+fn parse_login(args: impl Iterator<Item = String>) -> Result<Command> {
     let mut url: Option<String> = None;
+    let mut profile: Option<String> = None;
     let mut it = args;
     while let Some(arg) = it.next() {
+        if let Some(meta) = meta_command(&arg) {
+            return Ok(meta);
+        }
         match arg.as_str() {
             "--http" => {
                 let Some(u) = it.next() else {
@@ -146,29 +222,42 @@ fn parse_login(args: impl Iterator<Item = String>) -> Result<LoginArgs> {
                 };
                 url = Some(u);
             }
-            other => bail!("unexpected argument to `login`: {other} (usage: toonfmt login --http <url>)"),
+            "--profile" => {
+                let Some(p) = it.next() else {
+                    bail!("--profile requires a name argument");
+                };
+                profile = Some(p);
+            }
+            other => bail!("unexpected argument to `login`: {other} (usage: toonfmt login --http <url> [--profile <name>])"),
         }
     }
     match url {
-        Some(url) => Ok(LoginArgs { url }),
-        None => bail!("login requires an upstream; usage: toonfmt login --http <url>"),
+        Some(url) => Ok(Command::Login(LoginArgs { url, profile })),
+        None => bail!("login requires an upstream; usage: toonfmt login --http <url> [--profile <name>]"),
     }
 }
 
-/// Parse the serve forms (HTTP or stdio).
-fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
+/// Parse the serve forms (HTTP or stdio). May instead return a meta
+/// [`Command::Help`]/[`Command::Version`] if such a flag appears pre-`--`.
+fn parse_serve(args: impl Iterator<Item = String>) -> Result<Command> {
     let mut http_url: Option<String> = None;
     let mut bearer_env: Option<String> = None;
     let mut oauth = false;
     let mut oauth_interactive = false;
+    let mut profile: Option<String> = None;
     let mut after_sep: Option<Vec<String>> = None;
 
     let mut it = args;
     while let Some(arg) = it.next() {
         if let Some(rest) = after_sep.as_mut() {
-            // Already past `--`: collect the rest verbatim.
+            // Already past `--`: collect the rest verbatim. Meta flags here belong
+            // to the upstream argv (Gap E) — never inspected.
             rest.push(arg);
             continue;
+        }
+        // Pre-`--` meta flags pre-empt the whole serve spec (Gap E: pre-`--` only).
+        if let Some(meta) = meta_command(&arg) {
+            return Ok(meta);
         }
         match arg.as_str() {
             "--" => after_sep = Some(Vec::new()),
@@ -186,6 +275,12 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
             }
             "--oauth" => oauth = true,
             "--oauth-interactive" => oauth_interactive = true,
+            "--profile" => {
+                let Some(p) = it.next() else {
+                    bail!("--profile requires a name argument");
+                };
+                profile = Some(p);
+            }
             // Other pre-`--` tokens are reserved for later-phase flags; ignore.
             _ => {}
         }
@@ -209,7 +304,13 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
                 (None, false, true) => HttpAuth::OAuth,
                 (None, false, false) => HttpAuth::None,
             };
-            Ok(Upstream::Http(HttpUpstream { url, auth }))
+            // Fork B: `--profile` only namespaces the OAuth credential store, which
+            // only the OAuth modes read. With bearer/no-auth it would be a silent
+            // dead value — fail fast instead (mirrors the bearer/OAuth exclusivity).
+            if profile.is_some() && !matches!(auth, HttpAuth::OAuth | HttpAuth::OAuthInteractive) {
+                bail!("--profile applies only to OAuth upstreams (--oauth / --oauth-interactive)");
+            }
+            Ok(Command::Serve(Upstream::Http(HttpUpstream { url, auth, profile })))
         }
         (None, Some(after)) => {
             if bearer_env.is_some() {
@@ -221,16 +322,19 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Upstream> {
             if oauth_interactive {
                 bail!("--oauth-interactive applies to `--http` upstreams, not the stdio `--` form");
             }
+            if profile.is_some() {
+                bail!("--profile applies to `--http` OAuth upstreams, not the stdio `--` form");
+            }
             let mut after = after.into_iter();
             let Some(program) = after.next() else {
                 bail!(
                     "no upstream command after `--`; usage: toonfmt [flags] -- <program> [args...]"
                 );
             };
-            Ok(Upstream::Stdio(UpstreamCmd {
+            Ok(Command::Serve(Upstream::Stdio(UpstreamCmd {
                 program,
                 args: after.collect(),
-            }))
+            })))
         }
         (None, None) => bail!(
             "no upstream selected; usage: toonfmt --http <url> [--bearer-env VAR | --oauth | --oauth-interactive] | toonfmt -- <program> [args...]"
@@ -390,7 +494,10 @@ mod tests {
     #[test]
     fn login_well_formed() {
         match parse(&["login", "--http", "https://x.example/mcp"]).unwrap() {
-            Command::Login(LoginArgs { url }) => assert_eq!(url, "https://x.example/mcp"),
+            Command::Login(LoginArgs { url, profile }) => {
+                assert_eq!(url, "https://x.example/mcp");
+                assert_eq!(profile, None, "no --profile → shared default");
+            }
             other => panic!("expected Login, got {other:?}"),
         }
     }
@@ -407,6 +514,132 @@ mod tests {
     fn login_rejects_stray_args() {
         assert!(parse(&["login", "--http", "https://x", "--bearer-env", "TOK"]).is_err());
         assert!(parse(&["login", "--", "cat"]).is_err());
+    }
+
+    // --- --profile (H2) ---
+
+    /// `--profile` on an OAuth HTTP upstream → carried on the upstream.
+    #[test]
+    fn profile_on_oauth_http() {
+        let h = http(&["--http", "https://x.example/mcp", "--oauth", "--profile", "work"]);
+        assert_eq!(h.profile.as_deref(), Some("work"));
+        assert_eq!(h.auth, HttpAuth::OAuth);
+    }
+
+    /// `--profile` on interactive OAuth → carried too.
+    #[test]
+    fn profile_on_oauth_interactive_http() {
+        let h = http(&[
+            "--http", "https://x.example/mcp", "--oauth-interactive", "--profile", "personal",
+        ]);
+        assert_eq!(h.profile.as_deref(), Some("personal"));
+        assert_eq!(h.auth, HttpAuth::OAuthInteractive);
+    }
+
+    /// No `--profile` → None (shared default — today's behavior).
+    #[test]
+    fn no_profile_is_none() {
+        let h = http(&["--http", "https://x.example/mcp", "--oauth"]);
+        assert_eq!(h.profile, None);
+    }
+
+    /// A path-valued profile (`--profile ${CLAUDE_PROJECT_DIR}`) parses verbatim.
+    #[test]
+    fn profile_accepts_path_value() {
+        let h = http(&[
+            "--http", "https://x.example/mcp", "--oauth", "--profile", "/Users/me/project",
+        ]);
+        assert_eq!(h.profile.as_deref(), Some("/Users/me/project"));
+    }
+
+    /// `login --profile` → carried on LoginArgs.
+    #[test]
+    fn profile_on_login() {
+        match parse(&["login", "--http", "https://x.example/mcp", "--profile", "work"]).unwrap() {
+            Command::Login(LoginArgs { url, profile }) => {
+                assert_eq!(url, "https://x.example/mcp");
+                assert_eq!(profile.as_deref(), Some("work"));
+            }
+            other => panic!("expected Login, got {other:?}"),
+        }
+    }
+
+    /// Fork B: `--profile` is meaningless without OAuth — reject on no-auth HTTP,
+    /// with `--bearer-env`, and on the stdio `--` form (fail-fast, not silent drop).
+    #[test]
+    fn profile_rejected_without_oauth() {
+        // no-auth HTTP
+        assert!(parse(&["--http", "https://x", "--profile", "work"]).is_err());
+        // with --bearer-env
+        assert!(
+            parse(&["--http", "https://x", "--bearer-env", "TOK", "--profile", "work"]).is_err()
+        );
+        // stdio `--` form
+        assert!(parse(&["--profile", "work", "--", "cat"]).is_err());
+    }
+
+    /// `--profile` with a missing value errors rather than mis-parsing.
+    #[test]
+    fn profile_dangling_value_errors() {
+        assert!(parse(&["--http", "https://x", "--oauth", "--profile"]).is_err());
+        assert!(parse(&["login", "--http", "https://x", "--profile"]).is_err());
+    }
+
+    // --- help / version (H1) ---
+
+    /// `--help` / `-h` → Help (anywhere among pre-`--` tokens).
+    #[test]
+    fn help_flag_long_and_short() {
+        assert_eq!(parse(&["--help"]).unwrap(), Command::Help);
+        assert_eq!(parse(&["-h"]).unwrap(), Command::Help);
+    }
+
+    /// Bare `help` first token → Help (subcommand-position word).
+    #[test]
+    fn help_bare_word() {
+        assert_eq!(parse(&["help"]).unwrap(), Command::Help);
+    }
+
+    /// `--version` / `-V` → Version.
+    #[test]
+    fn version_flag_long_and_short() {
+        assert_eq!(parse(&["--version"]).unwrap(), Command::Version);
+        assert_eq!(parse(&["-V"]).unwrap(), Command::Version);
+    }
+
+    /// Meta flags pre-empt even a full, otherwise-valid upstream spec — they win
+    /// among any pre-`--` tokens.
+    #[test]
+    fn meta_flags_win_among_other_pre_sep_args() {
+        assert_eq!(
+            parse(&["--http", "https://x", "--oauth", "--help"]).unwrap(),
+            Command::Help
+        );
+        assert_eq!(
+            parse(&["--version", "--http", "https://x"]).unwrap(),
+            Command::Version
+        );
+    }
+
+    /// Gap E — passthrough fidelity: a meta flag *after* `--` belongs to the
+    /// upstream program's argv, never to toonfmt.
+    #[test]
+    fn meta_flags_after_separator_pass_through_to_upstream() {
+        let cmd = stdio(&["--", "echo", "--help"]);
+        assert_eq!(cmd.program, "echo");
+        assert_eq!(cmd.args, vec!["--help"]);
+
+        let cmd = stdio(&["--", "echo", "--version"]);
+        assert_eq!(cmd.program, "echo");
+        assert_eq!(cmd.args, vec!["--version"]);
+    }
+
+    /// Subcommands honor `--help`: it pre-empts their own arg validation, so
+    /// `login --help` does not error on the missing URL.
+    #[test]
+    fn subcommands_honor_help() {
+        assert_eq!(parse(&["login", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse(&["update", "--help"]).unwrap(), Command::Help);
     }
 
     // --- update subcommand ---
@@ -434,6 +667,7 @@ mod tests {
         let h = HttpUpstream {
             url: "https://x.example/mcp".to_string(),
             auth: HttpAuth::Bearer { env: var.to_string() },
+            profile: None,
         };
 
         // Absent → error.
@@ -454,6 +688,7 @@ mod tests {
         let none = HttpUpstream {
             url: "https://x.example/mcp".to_string(),
             auth: HttpAuth::None,
+            profile: None,
         };
         assert_eq!(none.resolve_bearer().unwrap(), None);
 
@@ -461,6 +696,7 @@ mod tests {
         let oauth = HttpUpstream {
             url: "https://x.example/mcp".to_string(),
             auth: HttpAuth::OAuth,
+            profile: None,
         };
         assert_eq!(oauth.resolve_bearer().unwrap(), None);
     }

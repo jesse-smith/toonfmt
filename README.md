@@ -48,6 +48,9 @@ update the way you installed (e.g. re-run `cargo install`).
 
 ## Use it
 
+`toonfmt --help` prints the full flag reference and `toonfmt --version` prints the version
+— the quickest way to see every option.
+
 Declare `toonfmt` as the command in your client's MCP config (`.mcp.json` for Claude
 Code). Pick the recipe that matches your upstream.
 
@@ -110,7 +113,43 @@ blocks your client's startup on a human.
 ```
 
 The `--http` URL must byte-match the URL you passed to `login`: the credential store is
-keyed by the exact string.
+keyed by the exact string. If you use `--profile` (below), the **profile must match too** —
+the store is keyed by URL *and* profile together.
+
+### Per-profile credentials (`--profile`)
+
+By default, all logins to one URL share a single token file — keyed by the URL alone. Add
+`--profile <name>` to give a URL **multiple independent identities** that don't overwrite
+each other. The same `--profile` must appear on both `login` and serve.
+
+```sh
+toonfmt login --http https://host/mcp --profile work
+toonfmt login --http https://host/mcp --profile personal
+```
+
+Two common uses:
+
+- **Same URL, different accounts** — `--profile work` vs. `--profile personal` keep their
+  tokens in separate files.
+- **Project-scoped tokens** — pass `--profile ${CLAUDE_PROJECT_DIR}` in a *project-scoped*
+  `.mcp.json` (Claude Code expands the variable). Each project then keys its own token
+  while a user-scoped server (no `--profile`) keeps sharing one. The path only feeds the
+  store *key* (it is hashed) — credentials always live under `~/.toonfmt-auth/`, never in
+  your repo.
+
+```jsonc
+{
+  "mcpServers": {
+    "oauth-svc": {
+      "command": "toonfmt",
+      "args": ["--http", "https://host/mcp", "--oauth", "--profile", "${CLAUDE_PROJECT_DIR}"]
+    }
+  }
+}
+```
+
+`--profile` is meaningful only for OAuth upstreams (`--oauth` / `--oauth-interactive`); it
+is rejected on a bearer-token, no-auth, or stdio upstream rather than silently ignored.
 
 ### HTTP upstream, OAuth (interactive)
 

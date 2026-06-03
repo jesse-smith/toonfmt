@@ -58,6 +58,17 @@ async fn run() -> Result<ExitCode> {
                 .context("update task panicked")?
                 .map(|()| ExitCode::SUCCESS)
         }
+        // Meta commands: print to stdout (the human front door, not the protocol
+        // channel — but help/version never coexist with a serve session, so stdout
+        // is correct and conventional here) and exit 0.
+        Command::Help => {
+            println!("{}", cli::USAGE);
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Version => {
+            println!("toonfmt {}", env!("CARGO_PKG_VERSION"));
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -67,7 +78,7 @@ async fn run() -> Result<ExitCode> {
 /// the protocol on the serve path, and keeping login's output on stderr too means
 /// the two never disagree about which stream is for humans).
 async fn login(args: LoginArgs) -> Result<ExitCode> {
-    let store = FileCredentialStore::for_url(&args.url)?;
+    let store = FileCredentialStore::for_url(&args.url, args.profile.as_deref())?;
     eprintln!("toonfmt: starting OAuth login for {}", args.url);
     let creds = oauth::login(&args.url, &store, open_in_browser).await?;
     eprintln!(
@@ -100,7 +111,7 @@ async fn serve_http(http: HttpUpstream) -> Result<ExitCode> {
         // OAuth: load the cached token (fail-fast if absent — never launches a
         // browser on the serve path) and wrap it in an AuthClient transport.
         HttpAuth::OAuth => {
-            let store = FileCredentialStore::for_url(&http.url)?;
+            let store = FileCredentialStore::for_url(&http.url, http.profile.as_deref())?;
             let auth_client = oauth::serve_auth_client(&http.url, store).await?;
             let transport = StreamableHttpClientTransport::with_client(auth_client, config);
             http_upstream::run(transport).await?;
@@ -110,7 +121,7 @@ async fn serve_http(http: HttpUpstream) -> Result<ExitCode> {
         // *before* `initialize`. Opt-in only — it can block the host's startup on a
         // human at the consent page.
         HttpAuth::OAuthInteractive => {
-            let store = FileCredentialStore::for_url(&http.url)?;
+            let store = FileCredentialStore::for_url(&http.url, http.profile.as_deref())?;
             let auth_client =
                 oauth::serve_auth_client_interactive(&http.url, store, open_in_browser_logged)
                     .await?;
