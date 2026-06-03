@@ -100,9 +100,13 @@ fn is_no_receipt_msg(msg: &str) -> bool {
     // <name>" — note it matches NONE of the 0.9-era qualifiers below, hence the
     // explicit "unable to load" arm (verified empirically against 0.10.0). This is
     // the canary the plan flagged: re-check this set whenever axoupdater is bumped.
+    // NOTE: the qualifier is `"no receipt"`, not a bare `"no"` — a bare substring
+    // would match incidental "no" inside `not`, `node`, `diagnostic`, `ignore`, …,
+    // misrouting a genuine failure into the swallowed no-receipt path. "unable to
+    // load" is axoupdater 0.10.0's actual `NoReceipt` wording (pinned by a test).
     msg.contains("receipt")
         && (msg.contains("not found")
-            || msg.contains("no")
+            || msg.contains("no receipt")
             || msg.contains("missing")
             || msg.contains("couldn't")
             || msg.contains("unable to load"))
@@ -186,8 +190,17 @@ mod tests {
 
     #[test]
     fn no_receipt_rejects_receipt_without_qualifier() {
-        // "receipt" alone, without not found / no / missing / couldn't.
+        // "receipt" alone, without not found / no receipt / missing / couldn't.
         assert!(!is_no_receipt_msg("receipt loaded successfully"));
+    }
+
+    #[test]
+    fn no_receipt_rejects_incidental_no_substring() {
+        // Pins finding from Q3 review: the qualifier must be "no receipt", not a bare
+        // "no". A real failure that mentions "receipt" and contains an incidental
+        // "no" (here inside "diagnostic"/"cannot") must NOT be swallowed as the
+        // no-receipt (→ Ok) path — it has to surface.
+        assert!(!is_no_receipt_msg("receipt diagnostic: cannot reach server"));
     }
 
     // --- is_network_error_msg ---

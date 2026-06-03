@@ -1,5 +1,8 @@
 # toonfmt
 
+[![CI](https://github.com/jesse-smith/toonfmt/actions/workflows/ci.yml/badge.svg)](https://github.com/jesse-smith/toonfmt/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/jesse-smith/toonfmt/branch/main/graph/badge.svg)](https://codecov.io/gh/jesse-smith/toonfmt)
+
 A transparent [MCP](https://modelcontextprotocol.io) proxy that re-encodes tool-call
 results as [TOON](https://toonformat.dev), a compact format that costs a model fewer
 tokens to read than the equivalent JSON. You point your MCP client at `toonfmt` instead

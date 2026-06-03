@@ -468,6 +468,13 @@ mod tests {
         assert!(parse(&["--oauth-interactive", "--", "cat"]).is_err());
     }
 
+    /// `--bearer-env` on the stdio `--` form → error (bearer is HTTP-only; on stdio
+    /// it would be a silently-ignored dead flag, so fail fast).
+    #[test]
+    fn bearer_env_on_stdio_errors() {
+        assert!(parse(&["--bearer-env", "TOK", "--", "cat"]).is_err());
+    }
+
     /// `--http <url> -- cat` → ambiguous → error.
     #[test]
     fn http_and_stdio_is_ambiguous() {

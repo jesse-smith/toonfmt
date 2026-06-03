@@ -1,0 +1,16 @@
+# Cognitive-complexity ceiling for the project (Q4, plan 2026-06-03).
+#
+# This sets the THRESHOLD only — it does not enable the lint. `cognitive_complexity`
+# is a clippy *nursery* (allow-by-default) lint, and clippy.toml cannot enable/deny
+# lints; the crate-root `#![warn(clippy::cognitive_complexity)]` in `src/main.rs`
+# does that, and CI's `-D warnings` makes it blocking.
+#
+# Why 20: the metric is SonarSource cognitive complexity (incremental + nesting
+# multiplier → ~quadratic in depth). SonarSource's designed line is 15; clippy's
+# default 25 is a permissive carry-over from its `cyclomatic_complexity` past. 20
+# sits just above the designed band — tight enough to flag genuinely-deep future
+# code, loose enough never to false-positive on flat code. The one current function
+# over 20 (`http_upstream::run` @ 24, the constitution-protected handshake) carries
+# an explicit `#[allow]` with a reason. Re-check on toolchain bumps (nursery lints
+# are outside clippy's stability guarantee).
+cognitive-complexity-threshold = 20

@@ -184,6 +184,45 @@ mod tests {
     }
 
     #[test]
+    fn out_of_i64_range_id_is_a_stable_correlation_key() {
+        // An id outside i64 range (here: past i64::MAX, which serde parses as f64)
+        // falls to `RequestId::Other`. We do NOT promise byte-identity with the wire
+        // form — serde may render it canonically (e.g. "1e+20"). What we DO promise,
+        // and what correlation actually needs, is that the *same* wire id produces the
+        // *same* key on the request and on its response, so take_method still matches.
+        let wire = "100000000000000000000"; // > i64::MAX
+        let req = parse_line(&format!(r#"{{"jsonrpc":"2.0","id":{wire},"method":"x"}}"#));
+        let resp = parse_line(&format!(r#"{{"jsonrpc":"2.0","id":{wire},"result":{{}}}}"#));
+        let (Message::Request { id: req_id, .. }, Message::Response { id: resp_id }) = (&req, &resp)
+        else {
+            panic!("expected Request + Response, got {req:?} / {resp:?}");
+        };
+        assert!(matches!(req_id, RequestId::Other(_)), "big id → Other, got {req_id:?}");
+        assert_eq!(req_id, resp_id, "same wire id must yield the same correlation key");
+
+        // And the key round-trips through the tracker like any other id.
+        let t = RequestTracker::new();
+        t.record_request(req_id.clone(), "x".into());
+        assert_eq!(t.take_method(resp_id), Some("x".into()));
+    }
+
+    #[test]
+    fn non_scalar_id_makes_it_unclassifiable() {
+        // A structured (non-string/number) id can't be a JSON-RPC id; with a method
+        // present but the id unusable, the result is Notification (method, no id) —
+        // the id is simply not extracted, never panics.
+        let m = parse_line(r#"{"jsonrpc":"2.0","id":true,"method":"x"}"#);
+        assert_eq!(m, Message::Notification { method: "x".into() });
+    }
+
+    #[test]
+    fn object_with_neither_method_nor_id_is_other() {
+        // Fail-safe passthrough: a JSON object that is neither request, response, nor
+        // notification classifies as Other and is forwarded unchanged.
+        assert_eq!(parse_line(r#"{"jsonrpc":"2.0","foo":1}"#), Message::Other);
+    }
+
+    #[test]
     fn classify_operates_on_parsed_value_directly() {
         // The downstream path classifies an already-parsed Value (no re-parse).
         let v: Value =

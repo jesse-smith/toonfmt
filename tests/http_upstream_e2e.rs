@@ -155,6 +155,15 @@ async fn http_upstream_transforms_across_framings() {
         .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
         .await
         .unwrap();
+    // A non-JSON line on stdin must be warned-and-skipped (it cannot be forwarded
+    // over HTTP), NOT crash the driver — the valid calls that follow still succeed.
+    // This is the only client→upstream resilience arm the stub can drive
+    // deterministically (server-initiated requests + in-flight drain need stub
+    // capabilities it doesn't have; those stay as documented residual).
+    stdin
+        .write_all(b"this is not json-rpc at all\n")
+        .await
+        .unwrap();
     for (id, name) in [
         (2, "probe_content_only"),
         (3, "probe_sse"),

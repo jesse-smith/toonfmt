@@ -21,10 +21,28 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: clippy
+          components: clippy, llvm-tools-preview
 
+      # `-D warnings` makes the crate-root `#![warn(clippy::cognitive_complexity)]`
+      # (threshold 20, set in clippy.toml) a blocking gate alongside every other lint.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Tests
-        run: cargo test
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Coverage doubles as the test run. We measure the *coverable surface*:
+      # `src/main.rs` (the composition root — wiring + the platform browser spawn) is
+      # excluded as inherently un-unit-testable (see plans/2026-06-03-coverage-quality.md).
+      - name: Tests with coverage
+        run: cargo llvm-cov --ignore-filename-regex 'src/main\.rs' --codecov --output-path codecov.json
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: codecov.json
+          # false (NOT dbtoon's true): this repo has no CODECOV_TOKEN secret yet, and
+          # a missing-token upload error must not turn the whole CI run red. Tokenless
+          # uploads still work for public repos; set the secret later to harden.
+          fail_ci_if_error: false

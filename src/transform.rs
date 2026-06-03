@@ -173,6 +173,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn non_object_content_element_is_skipped() {
+        // A `content` array may legally hold non-object elements (the schema is
+        // loose). A bare scalar is not a block to transform — skip it, don't panic,
+        // and (with nothing else convertible) return None.
+        let env = envelope(json!({"content": ["a bare string", 42]}));
+        assert!(tools_call_result(env).is_none());
+    }
+
+    #[test]
+    fn text_typed_block_without_string_text_is_skipped() {
+        // type == "text" but `text` is absent / not a string. Don't transform, don't
+        // panic — the block passes through and the call returns None (no change).
+        let env = envelope(json!({"content": [
+            {"type": "text"},                       // no `text` field
+            {"type": "text", "text": {"not": "a string"}}, // `text` is an object
+        ]}));
+        assert!(tools_call_result(env).is_none());
+    }
+
     /// (e) `result.isError == true` → None (error payloads left as prose).
     #[test]
     fn is_error_returns_none() {

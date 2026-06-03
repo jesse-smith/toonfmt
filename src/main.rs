@@ -3,6 +3,12 @@
 //! Phase 1: passthrough only. Spawns the upstream server (everything after `--`)
 //! and pumps JSON-RPC both directions unchanged. The TOON transform lands later.
 
+// Enable the nursery cognitive-complexity lint crate-wide (clippy.toml sets the
+// threshold to 20 but cannot enable a lint). CI's `-D warnings` makes it blocking;
+// having it here (not a CI-only `-W` flag) also fires it on a plain local `cargo
+// clippy`, so complexity is caught before CI.
+#![warn(clippy::cognitive_complexity)]
+
 mod cli;
 mod credential_store;
 mod http_upstream;

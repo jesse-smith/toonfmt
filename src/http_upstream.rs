@@ -39,6 +39,13 @@ use crate::proxy::transform_downstream;
 /// (built via `with_client`). They are different concrete types, unified only by
 /// this trait — so auth selection is a **construction-time** branch in `main`, and
 /// this loop never sees it. The loop uses only `send`/`receive`/`close`.
+// The cognitive-complexity ceiling (20, set crate-wide in clippy.toml) is exceeded
+// here (24) by design: the explicit initialize→response→initialized handshake below
+// MUST stay as distinct sequential steps — collapsing it into the steady-state loop
+// deadlocks against rmcp's worker (see the "do NOT collapse" block). The constitution
+// forbids that collapse, so this is the one inherent exception, made self-documenting
+// rather than hidden under a higher global threshold.
+#[allow(clippy::cognitive_complexity)]
 pub async fn run<T>(mut transport: T) -> Result<()>
 where
     T: Transport<RoleClient>,
