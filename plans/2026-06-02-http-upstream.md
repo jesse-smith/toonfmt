@@ -506,9 +506,12 @@ locally** unless the transport's async send/receive ordering forces correlation.
   discarded-elicitation rationale), and the Phase-3 Scope note (Slice C landed, keep/discard verdict).
   Memory `slice-c-oauth-channels.md` records the kept/discarded channels with the why for each
   (links [[rmcp-oauth-api]], [[b6-claude-code-oauth-findings]]). Gates: 74 tests green, clippy
-  `-D warnings` clean. cairn-accept Slice C (Status flipped to landed). **User-gated next step (not
-  done here):** live in-client manual acceptance of `--oauth-interactive` against a real OAuth server
-  (parallel to B6) — auto-open's in-client UX is verified only against the headless stub so far.
+  `-D warnings` clean. cairn-accept Slice C (Status flipped to landed). **Live in-client acceptance
+  PASSED (2026-06-02)** against the real Cloudflare OAuth server in real Claude Code: missing-token
+  → browser auto-launched (CC log: "launching browser to authorize…"), consent completed in **20.2s**
+  (inside the 30s connect timeout), a fresh token minted + persisted (new `access_token`,
+  `token_received_at` advanced), `initialize` succeeded with `hasTools:true` (`workers-bindings`
+  0.5.0). The auto-open path is now verified end-to-end, not just against the headless stub.
 
 <!-- VERIFICATION TARGETS the user will supply when ready (do not invent / hardcode):
   1. Databricks SQL MCP (token auth) — primary, Slice A (A6).
