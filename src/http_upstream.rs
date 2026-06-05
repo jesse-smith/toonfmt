@@ -28,6 +28,7 @@ use rmcp::transport::Transport;
 
 use crate::jsonrpc::{Message, RequestTracker, classify};
 use crate::proxy::transform_downstream;
+use crate::stats::StatsHandle;
 
 /// Drive an already-constructed rmcp client transport until the client's stdin
 /// closes or the upstream ends.
@@ -46,7 +47,7 @@ use crate::proxy::transform_downstream;
 // forbids that collapse, so this is the one inherent exception, made self-documenting
 // rather than hidden under a higher global threshold.
 #[allow(clippy::cognitive_complexity)]
-pub async fn run<T>(mut transport: T) -> Result<()>
+pub async fn run<T>(mut transport: T, stats: Option<StatsHandle>) -> Result<()>
 where
     T: Transport<RoleClient>,
 {
@@ -96,7 +97,7 @@ where
             msg,
             JsonRpcMessage::Response(_) | JsonRpcMessage::Error(_)
         );
-        forward_to_client(&mut stdout, &tracker, msg).await?;
+        forward_to_client(&mut stdout, &tracker, stats.as_ref(), msg).await?;
         if is_response {
             break;
         }
@@ -127,7 +128,7 @@ where
             }
             from_upstream = transport.receive() => {
                 match from_upstream {
-                    Some(msg) => forward_to_client(&mut stdout, &tracker, msg).await?,
+                    Some(msg) => forward_to_client(&mut stdout, &tracker, stats.as_ref(), msg).await?,
                     // Upstream closed the session: nothing left to receive. Break to
                     // teardown; the drain loop below no-ops (receive() returns None).
                     None => break,
@@ -150,7 +151,7 @@ where
         let drain = async {
             while tracker.pending_count() > 0 {
                 match transport.receive().await {
-                    Some(msg) => forward_to_client(&mut stdout, &tracker, msg).await?,
+                    Some(msg) => forward_to_client(&mut stdout, &tracker, stats.as_ref(), msg).await?,
                     None => break, // upstream closed
                 }
             }
@@ -233,6 +234,7 @@ where
 async fn forward_to_client(
     stdout: &mut Stdout,
     tracker: &RequestTracker,
+    stats: Option<&StatsHandle>,
     msg: JsonRpcMessage<
         rmcp::model::ServerRequest,
         rmcp::model::ServerResult,
@@ -245,7 +247,7 @@ async fn forward_to_client(
             // Pre-serialize for the passthrough case; `transform_downstream` takes
             // ownership of `val` and returns `Some` only when it rewrote it.
             let passthrough = val.to_string();
-            let line = transform_downstream(val, tracker).unwrap_or(passthrough);
+            let line = transform_downstream(val, tracker, stats).unwrap_or(passthrough);
             stdout
                 .write_all(line.as_bytes())
                 .await

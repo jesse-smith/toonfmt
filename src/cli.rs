@@ -42,6 +42,8 @@ AUTH (HTTP upstreams only):
                            use --profile ${CLAUDE_PROJECT_DIR} for project-scoped tokens
 
 OPTIONS:
+    --stats                record token-savings stats to ~/.toonfmt/stats.db (opt-in;
+                           also enabled by TOONFMT_STATS=1). View with `toonfmt stats`.
     -h, --help             print this help and exit
     -V, --version          print version and exit
 
@@ -132,7 +134,10 @@ pub struct LoginArgs {
 /// one-shot OAuth flow; `update` self-updates an installer-based build.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Serve(Upstream),
+    /// Run the proxy. `stats` enables the opt-in token-savings store (`--stats`, or
+    /// `TOONFMT_STATS=1` OR'd in by `main`); when false the default zero-overhead
+    /// passthrough opens no store.
+    Serve { upstream: Upstream, stats: bool },
     Login(LoginArgs),
     /// `toonfmt update`: self-update via the install receipt. Takes no arguments.
     Update,
@@ -245,6 +250,7 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Command> {
     let mut oauth = false;
     let mut oauth_interactive = false;
     let mut profile: Option<String> = None;
+    let mut stats = false;
     let mut after_sep: Option<Vec<String>> = None;
 
     let mut it = args;
@@ -275,6 +281,10 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Command> {
             }
             "--oauth" => oauth = true,
             "--oauth-interactive" => oauth_interactive = true,
+            // Opt-in stats store. Serve-wide (both stdio and HTTP upstreams); unlike
+            // the auth flags it is never upstream-shape-specific, so it is collected
+            // here and applied to whichever `Command::Serve` we build below.
+            "--stats" => stats = true,
             "--profile" => {
                 let Some(p) = it.next() else {
                     bail!("--profile requires a name argument");
@@ -310,7 +320,10 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Command> {
             if profile.is_some() && !matches!(auth, HttpAuth::OAuth | HttpAuth::OAuthInteractive) {
                 bail!("--profile applies only to OAuth upstreams (--oauth / --oauth-interactive)");
             }
-            Ok(Command::Serve(Upstream::Http(HttpUpstream { url, auth, profile })))
+            Ok(Command::Serve {
+                upstream: Upstream::Http(HttpUpstream { url, auth, profile }),
+                stats,
+            })
         }
         (None, Some(after)) => {
             if bearer_env.is_some() {
@@ -331,10 +344,13 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Command> {
                     "no upstream command after `--`; usage: toonfmt [flags] -- <program> [args...]"
                 );
             };
-            Ok(Command::Serve(Upstream::Stdio(UpstreamCmd {
-                program,
-                args: after.collect(),
-            })))
+            Ok(Command::Serve {
+                upstream: Upstream::Stdio(UpstreamCmd {
+                    program,
+                    args: after.collect(),
+                }),
+                stats,
+            })
         }
         (None, None) => bail!(
             "no upstream selected; usage: toonfmt --http <url> [--bearer-env VAR | --oauth | --oauth-interactive] | toonfmt -- <program> [args...]"
@@ -352,7 +368,15 @@ mod tests {
 
     fn serve(tokens: &[&str]) -> Upstream {
         match parse(tokens).unwrap() {
-            Command::Serve(u) => u,
+            Command::Serve { upstream, .. } => upstream,
+            other => panic!("expected Serve, got {other:?}"),
+        }
+    }
+
+    /// The `stats` flag from a parsed serve command (the other half of `serve`).
+    fn serve_stats(tokens: &[&str]) -> bool {
+        match parse(tokens).unwrap() {
+            Command::Serve { stats, .. } => stats,
             other => panic!("expected Serve, got {other:?}"),
         }
     }
@@ -590,6 +614,31 @@ mod tests {
     fn profile_dangling_value_errors() {
         assert!(parse(&["--http", "https://x", "--oauth", "--profile"]).is_err());
         assert!(parse(&["login", "--http", "https://x", "--profile"]).is_err());
+    }
+
+    // --- --stats (opt-in token-savings store) ---
+
+    /// No `--stats` → off (the default zero-overhead passthrough).
+    #[test]
+    fn stats_defaults_off() {
+        assert!(!serve_stats(&["--", "cat"]));
+        assert!(!serve_stats(&["--http", "https://x.example/mcp"]));
+    }
+
+    /// `--stats` enables the store on both the stdio and HTTP serve forms.
+    #[test]
+    fn stats_flag_enables_on_both_forms() {
+        assert!(serve_stats(&["--stats", "--", "cat"]));
+        assert!(serve_stats(&["--http", "https://x.example/mcp", "--stats"]));
+    }
+
+    /// `--stats` is position-independent and composes with auth flags.
+    #[test]
+    fn stats_flag_position_independent() {
+        assert!(serve_stats(&["--http", "https://x", "--oauth", "--stats", "--profile", "p"]));
+        // and the upstream still parses correctly alongside it
+        let h = http(&["--http", "https://x", "--stats", "--oauth"]);
+        assert_eq!(h.auth, HttpAuth::OAuth);
     }
 
     // --- help / version (H1) ---

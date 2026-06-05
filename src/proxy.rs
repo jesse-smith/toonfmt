@@ -14,6 +14,7 @@ use tokio::process::Command;
 
 use crate::cli::UpstreamCmd;
 use crate::jsonrpc::{Message, RequestTracker, classify, parse_line};
+use crate::stats::StatsHandle;
 use crate::transform;
 
 /// Copy newline-framed messages from `reader` to `writer`, invoking `on_line`
@@ -76,7 +77,15 @@ where
 /// `to_value` of an rmcp message), never what we do with it. The correlation is
 /// causal on both legs: the request that set the tracker entry is always sent
 /// before its response can arrive.
-pub fn transform_downstream(value: Value, tracker: &RequestTracker) -> Option<String> {
+///
+/// `stats` is `Some` only when the opt-in stats store is enabled; when present, the
+/// transformed result's delivered savings are recorded (non-blocking — see
+/// [`StatsHandle::record`]). When `None`, this is the original zero-overhead path.
+pub fn transform_downstream(
+    value: Value,
+    tracker: &RequestTracker,
+    stats: Option<&StatsHandle>,
+) -> Option<String> {
     let Message::Response { id } = classify(&value) else {
         return None; // not a response (request/notification/other) → passthrough
     };
@@ -87,16 +96,24 @@ pub fn transform_downstream(value: Value, tracker: &RequestTracker) -> Option<St
         tracing::trace!(%method, "response correlated (passthrough)");
         return None;
     }
-    // The owned, already-parsed envelope goes straight to the transform — no
-    // second parse. Some(replacement) rewrites the message; None forwards it.
-    // The per-result delivered savings ride alongside the replacement; S2 is pure
-    // accounting, so the hot path discards them here — S3 wires the stats channel.
-    transform::tools_call_result(value).map(|(replacement, _savings)| replacement)
+    // The owned, already-parsed envelope goes straight to the transform — no second
+    // parse. Some(replacement) rewrites the message; None forwards it. The per-result
+    // delivered savings ride alongside the replacement; record them iff stats are on
+    // (`record` is non-blocking and self-gates the not-delivered zero case).
+    transform::tools_call_result(value).map(|(replacement, savings)| {
+        if let Some(s) = stats {
+            s.record(savings);
+        }
+        replacement
+    })
 }
 
 /// Spawn the upstream command and run the three-flow pump until the child exits.
 /// Returns the child's exit status so the caller can propagate it.
-pub async fn run(cmd: UpstreamCmd) -> Result<ExitStatus> {
+///
+/// `stats` is `Some` only when the opt-in store is enabled; it is moved into the
+/// downstream pump task and recorded against per `tools/call` result.
+pub async fn run(cmd: UpstreamCmd, stats: Option<StatsHandle>) -> Result<ExitStatus> {
     let mut child = Command::new(&cmd.program)
         .args(&cmd.args)
         .stdin(Stdio::piped())
@@ -136,7 +153,7 @@ pub async fn run(cmd: UpstreamCmd) -> Result<ExitStatus> {
             let Ok(value) = serde_json::from_str::<Value>(line) else {
                 return None;
             };
-            transform_downstream(value, &down_tracker)
+            transform_downstream(value, &down_tracker, stats.as_ref())
         })
         .await
     });
@@ -192,7 +209,7 @@ mod tests {
             "jsonrpc": "2.0", "id": 1,
             "result": {"content": [{"type": "text", "text": inner}]}
         });
-        let out = transform_downstream(resp, &tracker).expect("tools/call → Some");
+        let out = transform_downstream(resp, &tracker, None).expect("tools/call → Some");
         let parsed: Value = serde_json::from_str(&out).unwrap();
         let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
         assert!(
@@ -207,7 +224,7 @@ mod tests {
             "result": {"content": [{"type": "text", "text": inner}]}
         });
         assert!(
-            transform_downstream(unknown, &tracker).is_none(),
+            transform_downstream(unknown, &tracker, None).is_none(),
             "uncorrelated id → None (passthrough), even with a transformable body"
         );
 
@@ -216,7 +233,7 @@ mod tests {
         tracker3.record_request(RequestId::Num(2), "tools/list".to_string());
         let list_resp = json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}});
         assert!(
-            transform_downstream(list_resp, &tracker3).is_none(),
+            transform_downstream(list_resp, &tracker3, None).is_none(),
             "tools/list response → None (passthrough)"
         );
     }

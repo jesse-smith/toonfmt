@@ -128,20 +128,30 @@ no architectural change — the work is *accounting and surfacing*, not *capturi
   IO/DB/flag. 5 new tests (s1–s5): content-only exact, **signed-negative** (empirically-grounded
   non-uniform array, TOON > JSON), strip-path delivered, kept-SC zero, multi-block signed sum. Full
   suite 113 passed; clippy `-D warnings` clean (complexity gate not tripped). cairn-verify: PASS.
-- [ ] **S3 — Stats store + async writer (SQLite/WAL).** Add `rusqlite` (bundled). New `stats`
-  module: open/create the WAL DB under the data dir, set `busy_timeout` + `synchronous=NORMAL`,
-  one append-only events table (`saved_bytes`, `original_bytes`, `project_path`, `ts`). Bounded MPSC
-  **`project_path` provenance DECIDED 2026-06-05: `$CLAUDE_PROJECT_DIR`, read once at serve
-  startup** (process-stable — one toonfmt process serves one project; verified in env per memory
-  `claude-code-mcp-subprocess-env`), fall back to `std::env::current_dir()` then `""` if unset. NOT
-  RTK's model: RTK records per-invocation cwd (its `project_path` rows show worktree/output subdirs,
-  which `CLAUDE_PROJECT_DIR` would collapse) because RTK is per-command; toonfmt is a long-lived
-  subprocess, so the env var is the better-grained, transport-blind identifier and avoids the
-  `--profile`/OAuth parse-rule tangle entirely.
-  queue + a writer task that drains and INSERTs; pump sites `try_send` (drop-on-full + `dropped`
-  counter, never block the hot path). **Gated entirely** by `--stats` / `TOONFMT_STATS=1` — when
-  off, no channel, no DB open, no rows: the default path stays byte-for-byte zero-overhead. Test the
-  writer drains correctly and that drop-on-full never blocks.
+- [x] **S3 — Stats store + async writer (SQLite/WAL). DONE 2026-06-05.** `rusqlite` 0.40 (bundled)
+  added (one-time amalgamation compile absorbed). New `src/stats.rs`: `Stats::open(base_dir,
+  project_path)` opens/creates the WAL DB (`PRAGMA journal_mode=WAL; synchronous=NORMAL`,
+  `busy_timeout=5s`), append-only `events(ts, project_path, original_bytes, saved_bytes)` + a
+  `(project_path, ts)` index. Bounded `tokio::mpsc` (cap 1024) + one `spawn_blocking` writer task
+  owning the single `Connection` (not `Sync` → confined; channel is the synchronization, no mutex).
+  `StatsHandle::record` `try_send`s — drop-on-full + `dropped` counter (logged at shutdown), and
+  **self-gates the not-delivered zero case** (`Savings::default()` → no row), so the store holds
+  delivered events only with each row's signed delta intact. `Stats::shutdown` drops the template
+  sender and joins → all buffered rows flush. **`project_path` provenance: `$CLAUDE_PROJECT_DIR`,
+  read once at serve startup** (process-stable — one toonfmt process serves one project; verified in
+  env per memory `claude-code-mcp-subprocess-env`), fallback `std::env::current_dir()` then `""`. NOT
+  RTK's per-invocation cwd model (RTK is per-command; toonfmt is a long-lived subprocess), and
+  decoupled from `--profile`/OAuth. Wiring: `transform_downstream` takes `Option<&StatsHandle>` and
+  records once (transport-blind — both stdio pump + HTTP driver); `--stats` serve flag (OR'd with
+  `TOONFMT_STATS=1`); the single opt-in seam is `Stats::open_if_enabled(enabled, project_path)` —
+  **off ⇒ returns `None`, touches nothing** (no dir, no DB, no channel, no task), and an open failure
+  degrades to `None` (logged) rather than faulting the proxy. 11 new tests (8 stats: drain-N→N +
+  summed, signed-negative round-trip, zero-default-skip, try_send drop-on-full never blocks,
+  two-writer WAL concurrency + per-project grouping, journal_mode=wal, **disabled-gate-creates-
+  nothing**, enabled-open-failure-degrades; 3 cli: `--stats` default-off / both-forms /
+  position-independent). Full suite 124 passed; clippy `-D warnings` clean; e2e-smoke confirmed a
+  real `--stats` serve writes the row and the off path creates no store dir. cairn-verify: PASS. (No
+  cairn-accept — the slice is not user-visible until S4's `toonfmt stats` readout.)
 - [ ] **S4 — `toonfmt stats` readout.** New subcommand (parser in `cli.rs`, alongside `login`/
   `update`): `SELECT SUM(saved_bytes), SUM(original_bytes) … GROUP BY project_path`, print exact
   bytes + % per project and a total, to stdout (this is a user command, not the proxy path — stdout
