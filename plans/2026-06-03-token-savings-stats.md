@@ -153,10 +153,30 @@ no architectural change — the work is *accounting and surfacing*, not *capturi
   real `--stats` serve writes the row and the off path creates no store dir. cairn-verify: PASS. (No
   cairn-accept — the slice is not user-visible until S4's `toonfmt stats` readout.)
 - [ ] **S4 — `toonfmt stats` readout.** New subcommand (parser in `cli.rs`, alongside `login`/
-  `update`): `SELECT SUM(saved_bytes), SUM(original_bytes) … GROUP BY project_path`, print exact
-  bytes + % per project and a total, to stdout (this is a user command, not the proxy path — stdout
-  is fine here). Honest formatting: bytes + %, no token figure; surface "N results grew" if Σ over a
-  project is negative. Multi-project fixture test.
+  `update`): print exact bytes + % saved per project and a total, to stdout (this is a user command,
+  not the proxy path — stdout is fine here). Honest formatting: bytes + %, no token figure.
+  **Four S3-derived constraints (locked 2026-06-05 — none touch the core `SUM … GROUP BY
+  project_path` aggregate, all are about how the reader touches the store):**
+  1. **Read-only, no-create open.** rusqlite's default `Connection::open` sets `SQLITE_OPEN_CREATE`,
+     so a naive reader run before the user ever served with `--stats` would *create* an empty
+     `~/.toonfmt/stats.db` as a side effect. `toonfmt stats` must be side-effect-free → open with
+     `OPEN_READ_ONLY`, treating the not-found error as the empty-state signal (#2).
+  2. **Graceful "no stats yet", not a SQLite error.** Because `open_if_enabled` only creates the dir
+     when stats are *on*, a user who never opted in has no DB. Print e.g. `no stats recorded yet —
+     serve with --stats or TOONFMT_STATS=1` and exit 0; never surface "unable to open database".
+  3. **Reader lives in `stats.rs`, not re-derived in `cli.rs` (DRY).** S3 made `STORE_DIR`,
+     `DB_FILE`, and `home_store_dir()` *private* to `stats.rs`. Add a `stats::read_summary()` that
+     owns the read-only open + the `GROUP BY` query and returns a plain struct (per-project rows +
+     totals); `cli.rs` only formats it. The S3 test helper `read_totals()` already prototyped the
+     exact query against the committed schema — promote it, don't re-spell the path.
+  4. **"N results grew" = COUNT of negative-delta rows, NOT gated on the project's net sign.**
+     **DECIDED 2026-06-05.** S3 stores *row-level* sign — delivered-but-grew blocks are kept with a
+     negative `saved_bytes` (only the all-zero not-delivered sentinel is dropped). So a project can
+     net *positive* yet still contain blocks that grew. Report `COUNT(*) WHERE saved_bytes < 0` per
+     project, regardless of the total's sign (supersedes the earlier "if Σ over a project is
+     negative" trigger — that would hide grew-rows inside a net-positive project).
+  Multi-project fixture test (drive `read_summary` over a seeded multi-project DB: per-project bytes
+  + %, the grew-count, and the file-absent → empty-state path).
 - [ ] **S5 — Docs + cairn-accept.** ARCHITECTURE.md (the stats store + the C-dep decision + NFS
   caveat), README (`--stats`/`TOONFMT_STATS` + `toonfmt stats`), memory note for the RTK-validated
   SQLite/WAL decision. Run cairn-accept.
@@ -173,6 +193,9 @@ no architectural change — the work is *accounting and surfacing*, not *capturi
 - Store is SQLite/WAL, append-only event rows (no update-an-aggregate); concurrent writers from
   multiple toonfmt processes are safe via WAL + `busy_timeout`. `toonfmt stats` aggregates at read
   with a per-project breakdown.
+- `toonfmt stats` is **side-effect-free**: it opens the store read-only and never creates it, so
+  running it before any `--stats` serve prints a graceful "no stats yet" (exit 0), not a DB error.
+  "N results grew" counts negative-delta rows per project, independent of the project's net sign.
 - The stats writer never blocks or slows the proxy hot path (bounded queue, `try_send`, drop-on-full)
   and never `fsync`s per call; an abrupt process kill loses at most the in-queue events, never the
   store.
