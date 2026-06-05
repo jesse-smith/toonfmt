@@ -1,8 +1,8 @@
-# Token-savings stats (opt-in) — DESIGN NOTE (pre-plan)
+# Token-savings stats (opt-in)
 
 **Date:** 2026-06-03  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-06-02-self-update.md (Phase B — self-update)
-**Status:** drafted (Q1 + Q2 DECIDED 2026-06-04; Q3 still open — confirm before coding)
+**Status:** in progress — Q1–Q3 + project_path provenance all DECIDED; S1+S2 landed (2026-06-05); S3 next.
 
 ## Goal
 Let a user *see* what toonfmt buys them: an **opt-in** readout of how many bytes/tokens the TOON
@@ -131,6 +131,13 @@ no architectural change — the work is *accounting and surfacing*, not *capturi
 - [ ] **S3 — Stats store + async writer (SQLite/WAL).** Add `rusqlite` (bundled). New `stats`
   module: open/create the WAL DB under the data dir, set `busy_timeout` + `synchronous=NORMAL`,
   one append-only events table (`saved_bytes`, `original_bytes`, `project_path`, `ts`). Bounded MPSC
+  **`project_path` provenance DECIDED 2026-06-05: `$CLAUDE_PROJECT_DIR`, read once at serve
+  startup** (process-stable — one toonfmt process serves one project; verified in env per memory
+  `claude-code-mcp-subprocess-env`), fall back to `std::env::current_dir()` then `""` if unset. NOT
+  RTK's model: RTK records per-invocation cwd (its `project_path` rows show worktree/output subdirs,
+  which `CLAUDE_PROJECT_DIR` would collapse) because RTK is per-command; toonfmt is a long-lived
+  subprocess, so the env var is the better-grained, transport-blind identifier and avoids the
+  `--profile`/OAuth parse-rule tangle entirely.
   queue + a writer task that drains and INSERTs; pump sites `try_send` (drop-on-full + `dropped`
   counter, never block the hot path). **Gated entirely** by `--stats` / `TOONFMT_STATS=1` — when
   off, no channel, no DB open, no rows: the default path stays byte-for-byte zero-overhead. Test the
