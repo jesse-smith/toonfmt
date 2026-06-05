@@ -89,7 +89,9 @@ pub fn transform_downstream(value: Value, tracker: &RequestTracker) -> Option<St
     }
     // The owned, already-parsed envelope goes straight to the transform — no
     // second parse. Some(replacement) rewrites the message; None forwards it.
-    transform::tools_call_result(value)
+    // The per-result delivered savings ride alongside the replacement; S2 is pure
+    // accounting, so the hot path discards them here — S3 wires the stats channel.
+    transform::tools_call_result(value).map(|(replacement, _savings)| replacement)
 }
 
 /// Spawn the upstream command and run the three-flow pump until the child exits.

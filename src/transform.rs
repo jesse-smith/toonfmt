@@ -8,14 +8,41 @@
 
 use serde_json::Value;
 
-/// Transform a `tools/call` result envelope. Returns `Some(serialized)` iff
-/// something changed (a content block was re-encoded as TOON, and/or a redundant
-/// `structuredContent` was stripped); `None` means "nothing to do — forward the
-/// original bytes unchanged" (the Phase 1 fidelity path).
+/// Per-result **delivered** byte savings from the TOON transform, in bytes.
+///
+/// Populated only for content the model actually ingests — the strip path
+/// (redundant `structuredContent` removed) or the content-only path (no
+/// `structuredContent` to shadow it). A *kept* (structurally-unequal)
+/// `structuredContent` shadows our TOON, so the model never reads it →
+/// [`Savings::default`] (both zero), even though the rewritten bytes are still
+/// emitted on the wire.
+///
+/// `saved_bytes` is **signed**: TOON can be *larger* than compact JSON for
+/// small or non-tabular payloads (no array-of-uniform-objects to collapse), so
+/// a transformed block can post a negative delta. The aggregate must sum signed
+/// deltas, never wins-only.
+///
+/// Fields map 1:1 onto the stats store's columns (S3); the proxy hot path
+/// discards this value today (S2 is pure accounting — no IO, no DB, no flag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Savings {
+    /// Σ of the original `content[].text` byte lengths over delivered transformed blocks.
+    pub original_bytes: u64,
+    /// Σ of `original − toon` byte deltas over delivered transformed blocks (signed).
+    pub saved_bytes: i64,
+}
+
+/// Transform a `tools/call` result envelope. Returns `Some((serialized, savings))`
+/// iff something changed (a content block was re-encoded as TOON, and/or a
+/// redundant `structuredContent` was stripped); `None` means "nothing to do —
+/// forward the original bytes unchanged" (the Phase 1 fidelity path). When `None`,
+/// nothing was transformed, so delivered savings are zero by definition.
+///
+/// The `savings` are **delivered-only and signed** — see [`Savings`].
 ///
 /// Receives the already-parsed envelope (the downstream pump parses each line to a
 /// `Value` once and reuses it) — does not re-parse.
-pub fn tools_call_result(mut value: Value) -> Option<String> {
+pub fn tools_call_result(mut value: Value) -> Option<(String, Savings)> {
     // 1. Navigate to `result`. Absent (an error response carrying `error`) → None.
     //    `result.isError == true` → None (error payloads are often prose).
     let result_obj = value.get_mut("result").and_then(Value::as_object_mut)?;
@@ -28,8 +55,13 @@ pub fn tools_call_result(mut value: Value) -> Option<String> {
 
     // 3. Re-encode each convertible text block as TOON, retaining the parsed
     //    `Value` for the equality gate. Per-block fallback: a block that doesn't
-    //    parse (or fails to encode) is left untouched.
+    //    parse (or fails to encode) is left untouched. Accumulate the original and
+    //    TOON byte lengths per converted block (captured *before* the `insert`
+    //    overwrites the text) — these become the savings if the result turns out
+    //    to be delivered (resolved after the strip decision in step 4).
     let mut transformed: Vec<Value> = Vec::new();
+    let mut original_bytes: u64 = 0;
+    let mut toon_bytes: u64 = 0;
     for block in content.iter_mut() {
         let Some(obj) = block.as_object_mut() else {
             continue;
@@ -50,6 +82,10 @@ pub fn tools_call_result(mut value: Value) -> Option<String> {
                 continue;
             }
         };
+        // Capture byte lengths before the text is overwritten; `text` borrows
+        // `obj`, so read its length before the `insert` reborrows `obj` mutably.
+        original_bytes += text.len() as u64;
+        toon_bytes += toon.len() as u64;
         obj.insert("text".to_string(), Value::String(toon));
         transformed.push(parsed);
     }
@@ -71,7 +107,26 @@ pub fn tools_call_result(mut value: Value) -> Option<String> {
         result_obj.remove("structuredContent");
     }
 
-    // 5. Nothing changed → None (preserve original bytes). Else re-serialize the
+    // 5. Resolve **delivered** savings. A transformed block is read by the model
+    //    iff no `structuredContent` shadows it — i.e. we either stripped a
+    //    structurally-equal one, or there was none to begin with. A *kept*
+    //    (unequal) `structuredContent` shadows every content block, so the TOON we
+    //    wrote is never read → savings are zero even though the bytes ship.
+    //    Delivered-ness is a per-result property: once nothing shadows the content
+    //    array, all of its transformed blocks are read together. After step 4 the
+    //    key is absent iff it was stripped or never present — exactly the delivered
+    //    cases — so its presence *now* is the shadow test.
+    let delivered = !result_obj.contains_key("structuredContent");
+    let savings = if delivered {
+        Savings {
+            original_bytes,
+            saved_bytes: original_bytes as i64 - toon_bytes as i64,
+        }
+    } else {
+        Savings::default()
+    };
+
+    // 6. Nothing changed → None (preserve original bytes). Else re-serialize the
     //    whole envelope compact. `preserve_order` keeps key order intact, so the
     //    only on-wire deltas are the rewritten `content[].text` and the removed
     //    `structuredContent` key (when stripped).
@@ -79,7 +134,7 @@ pub fn tools_call_result(mut value: Value) -> Option<String> {
     if !changed {
         return None;
     }
-    serde_json::to_string(&value).ok()
+    serde_json::to_string(&value).ok().map(|s| (s, savings))
 }
 
 /// Strict JSON first, then JSON5 (trailing commas, single quotes, unquoted keys,
@@ -117,7 +172,7 @@ mod tests {
         let text = serde_json::to_string(&inner).unwrap();
         let env = envelope(json!({"content": [{"type": "text", "text": text}]}));
 
-        let out = tools_call_result(env).unwrap();
+        let (out, _) = tools_call_result(env).unwrap();
         let parsed: Value = serde_json::from_str(&out).unwrap();
 
         assert_eq!(parsed["id"], json!(1));
@@ -132,7 +187,7 @@ mod tests {
     fn json5_block_converts() {
         let env = envelope(json!({"content": [{"type": "text", "text": r#"{"a":1,"b":2,}"#}]}));
 
-        let out = tools_call_result(env).unwrap();
+        let (out, _) = tools_call_result(env).unwrap();
         let parsed: Value = serde_json::from_str(&out).unwrap();
 
         let expected = toon_format::encode_default(&json!({"a": 1, "b": 2})).unwrap();
@@ -159,7 +214,7 @@ mod tests {
             image,
         ]}));
 
-        let out = tools_call_result(env).unwrap();
+        let (out, _) = tools_call_result(env).unwrap();
         let parsed: Value = serde_json::from_str(&out).unwrap();
 
         assert_eq!(
@@ -221,7 +276,7 @@ mod tests {
             "structuredContent": data,
         }));
 
-        let out = tools_call_result(env).unwrap();
+        let (out, _) = tools_call_result(env).unwrap();
         let parsed: Value = serde_json::from_str(&out).unwrap();
 
         assert_eq!(
@@ -244,7 +299,7 @@ mod tests {
             "structuredContent": {"id": 1, "name": "ann"},
         }));
 
-        let out = tools_call_result(env).unwrap();
+        let (out, _) = tools_call_result(env).unwrap();
         let parsed: Value = serde_json::from_str(&out).unwrap();
 
         assert!(parsed["result"].get("structuredContent").is_none());
@@ -260,7 +315,7 @@ mod tests {
             "content": [{"type": "text", "text": r#"{"id":1}"#}],
             "structuredContent": sc.clone(),
         }));
-        let out = tools_call_result(env).unwrap();
+        let (out, _) = tools_call_result(env).unwrap();
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             parsed["result"]["content"][0]["text"].as_str().unwrap(),
@@ -274,7 +329,7 @@ mod tests {
             "content": [{"type": "text", "text": r#"{"rows":[1,2,3]}"#}],
             "structuredContent": sc2.clone(),
         }));
-        let out2 = tools_call_result(env2).unwrap();
+        let (out2, _) = tools_call_result(env2).unwrap();
         let parsed2: Value = serde_json::from_str(&out2).unwrap();
         assert_eq!(parsed2["result"]["structuredContent"], sc2);
     }
@@ -306,12 +361,113 @@ mod tests {
         let text = serde_json::to_string(&inner).unwrap();
         let env = envelope(json!({"content": [{"type": "text", "text": text}]}));
 
-        let out = tools_call_result(env).unwrap();
+        let (out, _) = tools_call_result(env).unwrap();
         let parsed: Value = serde_json::from_str(&out).unwrap();
 
         assert_eq!(
             parsed["result"]["content"][0]["text"].as_str().unwrap(),
             "rows[1]{id,name}:\n  1,a"
         );
+    }
+
+    // ---- S2: delivered-only, signed savings accounting ----
+    //
+    // The metric must (1) count exact original bytes + signed delta on delivered
+    // paths, (2) go *negative* when TOON grows a block, (3) be *zero* when a kept
+    // `structuredContent` shadows the TOON the model never reads, and (4) sum
+    // per-block over a multi-block content array. Byte counts are derived from the
+    // encoder, never hardcoded, so an encoder change can't silently rot the test.
+
+    /// (s1) Content-only (no structuredContent) → delivered. `original_bytes` is the
+    /// exact input `text.len()`; `saved_bytes` is the exact signed delta. A tabular
+    /// array-of-objects shrinks, so the delta is positive here.
+    #[test]
+    fn savings_content_only_is_delivered_and_exact() {
+        let inner = json!({"users": [{"id": 1, "name": "ann"}, {"id": 2, "name": "bob"}]});
+        let text = serde_json::to_string(&inner).unwrap();
+        let toon = toon_format::encode_default(&inner).unwrap();
+        let env = envelope(json!({"content": [{"type": "text", "text": text.clone()}]}));
+
+        let (_, savings) = tools_call_result(env).unwrap();
+        assert_eq!(savings.original_bytes, text.len() as u64);
+        assert_eq!(savings.saved_bytes, text.len() as i64 - toon.len() as i64);
+        assert!(savings.saved_bytes > 0, "a uniform-object array should shrink under TOON");
+    }
+
+    /// (s2) Delivered but TOON is *larger* → `saved_bytes` is negative. Uses a
+    /// non-uniform array (no shared shape to collapse), measured larger as TOON.
+    /// This is the property that forbids a `u64`/wins-only metric.
+    #[test]
+    fn savings_can_be_negative_when_toon_grows() {
+        let inner = json!({"items": [{"a": 1}, {"b": 2, "c": 3}]});
+        let text = serde_json::to_string(&inner).unwrap();
+        let toon = toon_format::encode_default(&inner).unwrap();
+        assert!(toon.len() > text.len(), "fixture precondition: TOON larger than JSON");
+        let env = envelope(json!({"content": [{"type": "text", "text": text.clone()}]}));
+
+        let (_, savings) = tools_call_result(env).unwrap();
+        assert_eq!(savings.original_bytes, text.len() as u64);
+        assert_eq!(savings.saved_bytes, text.len() as i64 - toon.len() as i64);
+        assert!(savings.saved_bytes < 0, "TOON-larger block must post a negative delta");
+    }
+
+    /// (s3) Strip path (structuredContent equal → removed) → delivered, exact.
+    #[test]
+    fn savings_strip_path_is_delivered() {
+        let data = json!({"rows": [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}]});
+        let text = serde_json::to_string(&data).unwrap();
+        let toon = toon_format::encode_default(&data).unwrap();
+        let env = envelope(json!({
+            "content": [{"type": "text", "text": text.clone()}],
+            "structuredContent": data,
+        }));
+
+        let (_, savings) = tools_call_result(env).unwrap();
+        assert_eq!(savings.original_bytes, text.len() as u64);
+        assert_eq!(savings.saved_bytes, text.len() as i64 - toon.len() as i64);
+    }
+
+    /// (s4) Keep path (structuredContent present & not equal) → the TOON is
+    /// shadowed and never read → savings are **zero**, even though the call still
+    /// returns `Some` (bytes were rewritten on the wire). This is the delivered-only
+    /// rule's whole point.
+    #[test]
+    fn savings_kept_structured_content_contributes_zero() {
+        let sc = json!({"id": 1, "extra": true}); // extra field → not equal → kept
+        let env = envelope(json!({
+            "content": [{"type": "text", "text": r#"{"id":1}"#}],
+            "structuredContent": sc.clone(),
+        }));
+
+        let (out, savings) = tools_call_result(env).unwrap();
+        // It DID transform (Some) and kept structuredContent...
+        let parsed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["result"]["structuredContent"], sc);
+        // ...but nothing was delivered to the model, so savings are zero.
+        assert_eq!(savings, Savings::default());
+    }
+
+    /// (s5) Multi-block delivered: only convertible blocks count, and they sum.
+    /// One shrinking JSON block + one growing JSON block + prose (ignored) → the
+    /// aggregate is the signed sum of the two converted blocks' deltas.
+    #[test]
+    fn savings_sum_over_multiple_blocks() {
+        let a = json!({"rows": [{"id": 1, "name": "x"}, {"id": 2, "name": "y"}]}); // shrinks
+        let b = json!({"items": [{"a": 1}, {"b": 2, "c": 3}]}); // grows
+        let a_text = serde_json::to_string(&a).unwrap();
+        let b_text = serde_json::to_string(&b).unwrap();
+        let a_toon = toon_format::encode_default(&a).unwrap();
+        let b_toon = toon_format::encode_default(&b).unwrap();
+        let env = envelope(json!({"content": [
+            {"type": "text", "text": a_text.clone()},
+            {"type": "text", "text": "just prose, skipped"},
+            {"type": "text", "text": b_text.clone()},
+        ]}));
+
+        let (_, savings) = tools_call_result(env).unwrap();
+        assert_eq!(savings.original_bytes, (a_text.len() + b_text.len()) as u64);
+        let expected = (a_text.len() as i64 - a_toon.len() as i64)
+            + (b_text.len() as i64 - b_toon.len() as i64);
+        assert_eq!(savings.saved_bytes, expected);
     }
 }
