@@ -76,6 +76,15 @@ async fn run() -> Result<ExitCode> {
             println!("toonfmt {}", env!("CARGO_PKG_VERSION"));
             Ok(ExitCode::SUCCESS)
         }
+        // `toonfmt stats`: read the opt-in store and print the per-project summary to
+        // stdout (a human front-door command, not the protocol path). Side-effect-free
+        // — `read_summary` opens read-only and treats an absent store as empty state,
+        // which `format_summary` renders as a friendly nudge. Exit 0 either way.
+        Command::Stats => {
+            let summary = stats::read_summary()?;
+            println!("{}", cli::format_summary(&summary));
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

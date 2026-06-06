@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-03  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-06-02-self-update.md (Phase B — self-update)
-**Status:** in progress — Q1–Q3 + project_path provenance all DECIDED; S1+S2 landed (2026-06-05); S3 next.
+**Status:** in progress — Q1–Q3 + project_path provenance all DECIDED; S1–S4 landed (2026-06-05); S5 (docs + cairn-accept) next.
 
 ## Goal
 Let a user *see* what toonfmt buys them: an **opt-in** readout of how many bytes/tokens the TOON
@@ -152,31 +152,28 @@ no architectural change — the work is *accounting and surfacing*, not *capturi
   position-independent). Full suite 124 passed; clippy `-D warnings` clean; e2e-smoke confirmed a
   real `--stats` serve writes the row and the off path creates no store dir. cairn-verify: PASS. (No
   cairn-accept — the slice is not user-visible until S4's `toonfmt stats` readout.)
-- [ ] **S4 — `toonfmt stats` readout.** New subcommand (parser in `cli.rs`, alongside `login`/
-  `update`): print exact bytes + % saved per project and a total, to stdout (this is a user command,
-  not the proxy path — stdout is fine here). Honest formatting: bytes + %, no token figure.
-  **Four S3-derived constraints (locked 2026-06-05 — none touch the core `SUM … GROUP BY
-  project_path` aggregate, all are about how the reader touches the store):**
-  1. **Read-only, no-create open.** rusqlite's default `Connection::open` sets `SQLITE_OPEN_CREATE`,
-     so a naive reader run before the user ever served with `--stats` would *create* an empty
-     `~/.toonfmt/stats.db` as a side effect. `toonfmt stats` must be side-effect-free → open with
-     `OPEN_READ_ONLY`, treating the not-found error as the empty-state signal (#2).
-  2. **Graceful "no stats yet", not a SQLite error.** Because `open_if_enabled` only creates the dir
-     when stats are *on*, a user who never opted in has no DB. Print e.g. `no stats recorded yet —
-     serve with --stats or TOONFMT_STATS=1` and exit 0; never surface "unable to open database".
-  3. **Reader lives in `stats.rs`, not re-derived in `cli.rs` (DRY).** S3 made `STORE_DIR`,
-     `DB_FILE`, and `home_store_dir()` *private* to `stats.rs`. Add a `stats::read_summary()` that
-     owns the read-only open + the `GROUP BY` query and returns a plain struct (per-project rows +
-     totals); `cli.rs` only formats it. The S3 test helper `read_totals()` already prototyped the
-     exact query against the committed schema — promote it, don't re-spell the path.
-  4. **"N results grew" = COUNT of negative-delta rows, NOT gated on the project's net sign.**
-     **DECIDED 2026-06-05.** S3 stores *row-level* sign — delivered-but-grew blocks are kept with a
-     negative `saved_bytes` (only the all-zero not-delivered sentinel is dropped). So a project can
-     net *positive* yet still contain blocks that grew. Report `COUNT(*) WHERE saved_bytes < 0` per
-     project, regardless of the total's sign (supersedes the earlier "if Σ over a project is
-     negative" trigger — that would hide grew-rows inside a net-positive project).
-  Multi-project fixture test (drive `read_summary` over a seeded multi-project DB: per-project bytes
-  + %, the grew-count, and the file-absent → empty-state path).
+- [x] **S4 — `toonfmt stats` readout. DONE 2026-06-05.** New `stats` subcommand (parser in `cli.rs`
+  alongside `update` — no args, `--help` pre-empts) prints exact bytes + % saved per project + a
+  TOTAL line to stdout. `stats.rs` gained the read side: `Summary`/`ProjectSummary` (with
+  `saved_pct`, `totals`, `total_saved_pct`), `read_summary()` (prod, resolves `~/.toonfmt/`) and
+  `read_summary_in(base_dir)` (injectable for tests) over a factored `query_summary(&Connection)`.
+  `cli.rs` owns only the pure `format_summary(&Summary) -> String` + `human_bytes` + `STATS_EMPTY`;
+  `main.rs` is the lone IO seam (read + `println!`). All four locked constraints honored:
+  1. **Read-only, no-create open** — `OpenFlags::SQLITE_OPEN_READ_ONLY` + an `exists()` pre-check
+     (missing file → `Summary::default()` *before* any open, so the common not-opted-in case never
+     even touches SQLite; a genuinely unreadable *existing* file still surfaces its error).
+  2. **Graceful empty state** — `STATS_EMPTY` ("no stats recorded yet — serve with --stats …"),
+     exit 0, never a DB error.
+  3. **Reader in `stats.rs` (DRY)** — `STORE_DIR`/`DB_FILE`/`home_store_dir()` stay private; the S3
+     `read_totals()` query was promoted into `query_summary`.
+  4. **"N grew" = `SUM(CASE WHEN saved_bytes < 0 …)` per project, sign-independent** — annotated only
+     when >0; verified a net-positive project still reports its grew-rows.
+  9 new tests (5 reader in `stats.rs`: multi-project aggregate + order, sign-independent grew-count,
+  absent-store→empty+creates-nothing, net-negative signed %; 4 cli: parser well-formed/rejects-args/
+  honors-help, and 4 `format_summary` cases incl. the **no-token-figure** Q1 guard). Full suite 135
+  passed; clippy `-D warnings` clean; e2e-smoke confirmed a real `--stats` serve writes `/work/demo-
+  project 81 B → 35 B (43.2%)` and `toonfmt stats` renders it, while a clean-`$HOME` read prints the
+  empty state and creates no `.toonfmt`. cairn-verify (`cargo test` + `cargo build`): PASS.
 - [ ] **S5 — Docs + cairn-accept.** ARCHITECTURE.md (the stats store + the C-dep decision + NFS
   caveat), README (`--stats`/`TOONFMT_STATS` + `toonfmt stats`), memory note for the RTK-validated
   SQLite/WAL decision. Run cairn-accept.

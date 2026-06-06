@@ -28,15 +28,16 @@
 //! and no DB file exist — the default path stays byte-for-byte zero-overhead.
 //!
 //! **Injectable base dir:** [`Stats::open`] takes the base directory so tests drive a
-//! throwaway tempdir; [`Stats::open_default`] resolves the production `~/.toonfmt/`
-//! from `$HOME` (mirroring `credential_store`'s convention).
+//! throwaway tempdir; [`Stats::open_if_enabled`] resolves the production `~/.toonfmt/`
+//! from `$HOME` (mirroring `credential_store`'s convention). The S4 reader
+//! [`read_summary`] follows the same split ([`read_summary_in`] takes the base dir).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -240,6 +241,142 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+// ============================================================================
+// S4 — read side: `toonfmt stats` aggregates the append-only log at read time.
+// ============================================================================
+
+/// One project's aggregated savings (the per-`project_path` GROUP BY row).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSummary {
+    /// The `$CLAUDE_PROJECT_DIR` the writer stamped (may be `""` if it was unset).
+    pub project_path: String,
+    /// Number of delivered, recorded results (rows) for this project.
+    pub results: i64,
+    /// Σ of the original `content` block bytes the model would have read as JSON.
+    pub original_bytes: i64,
+    /// Σ of signed per-block deltas (`original − toon`). Net bytes saved; **can be
+    /// negative** if TOON grew more blocks than it shrank for this project.
+    pub saved_bytes: i64,
+    /// Count of rows whose `saved_bytes < 0` — results the transform *grew*. Reported
+    /// independently of `saved_bytes`'s sign (a net-positive project can still hold
+    /// grew-rows); per the locked S4 decision, this is the honest "N grew" figure.
+    pub grew_results: i64,
+}
+
+impl ProjectSummary {
+    /// Percent of original bytes saved (`saved / original * 100`), or `0.0` when there
+    /// is no baseline (no original bytes ⇒ no meaningful ratio). Signed: a net-grown
+    /// project reads negative.
+    pub fn saved_pct(&self) -> f64 {
+        if self.original_bytes <= 0 {
+            0.0
+        } else {
+            self.saved_bytes as f64 / self.original_bytes as f64 * 100.0
+        }
+    }
+}
+
+/// The whole-store readout: every project's row plus the grand totals. An **empty**
+/// `projects` vec is the "no stats yet" state (store absent or no delivered rows);
+/// the caller turns that into a friendly message, never a DB error.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Summary {
+    pub projects: Vec<ProjectSummary>,
+}
+
+impl Summary {
+    /// True when nothing has been recorded — drives the graceful empty-state message.
+    pub fn is_empty(&self) -> bool {
+        self.projects.is_empty()
+    }
+
+    /// Grand totals across all projects: `(results, original_bytes, saved_bytes,
+    /// grew_results)`. Summed in Rust over the already-aggregated rows (a handful of
+    /// projects — no second query needed).
+    pub fn totals(&self) -> (i64, i64, i64, i64) {
+        self.projects.iter().fold((0, 0, 0, 0), |(r, o, s, g), p| {
+            (r + p.results, o + p.original_bytes, s + p.saved_bytes, g + p.grew_results)
+        })
+    }
+
+    /// Total percent saved across all projects (Σsaved / Σoriginal). `0.0` with no
+    /// baseline. Robust per Q1: the bytes ratio approximates the token ratio.
+    pub fn total_saved_pct(&self) -> f64 {
+        let (_, original, saved, _) = self.totals();
+        if original <= 0 {
+            0.0
+        } else {
+            saved as f64 / original as f64 * 100.0
+        }
+    }
+}
+
+/// Read the production store (`~/.toonfmt/stats.db`) and aggregate it. Resolves the
+/// base dir exactly as the writer does; a `$HOME`-unset failure surfaces as an empty
+/// summary (there can be no store without a home dir), not an error.
+pub fn read_summary() -> Result<Summary> {
+    match Stats::home_store_dir() {
+        Ok(dir) => read_summary_in(&dir),
+        // No `$HOME` ⇒ no store could ever have been written ⇒ empty state.
+        Err(_) => Ok(Summary::default()),
+    }
+}
+
+/// Aggregate the store under `base_dir` (injected for tests). **Side-effect-free and
+/// read-only** — the two locked S4 invariants:
+///
+/// 1. **No-create open.** rusqlite's default [`Connection::open`] sets
+///    `SQLITE_OPEN_CREATE`, so a reader run before any `--stats` serve would *create*
+///    an empty DB as a side effect. We open `OPEN_READ_ONLY` (no create bit). As
+///    belt-and-suspenders we also pre-check `exists()`: a missing file is the
+///    empty-state signal (returned as `Summary::default()`), so we never even reach
+///    the open for the common not-yet-opted-in case — and a genuinely *unreadable
+///    existing* file still surfaces its error rather than masquerading as "no stats".
+/// 2. **Aggregate-at-read.** One `GROUP BY project_path` over the append-only log;
+///    the grew-count is `SUM(saved_bytes < 0)` per project, sign-independent.
+pub fn read_summary_in(base_dir: &Path) -> Result<Summary> {
+    let db_path = base_dir.join(DB_FILE);
+    if !db_path.exists() {
+        return Ok(Summary::default()); // never served with --stats → no store
+    }
+    let conn = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("opening stats db read-only {}", db_path.display()))?;
+    query_summary(&conn)
+}
+
+/// The read query, factored out so tests can drive it against an in-memory or
+/// tempdir connection. Rows are ordered by bytes saved descending (the biggest win
+/// first — what the user came to see).
+fn query_summary(conn: &Connection) -> Result<Summary> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT project_path, \
+                    COUNT(*), \
+                    COALESCE(SUM(original_bytes), 0), \
+                    COALESCE(SUM(saved_bytes), 0), \
+                    COALESCE(SUM(CASE WHEN saved_bytes < 0 THEN 1 ELSE 0 END), 0) \
+             FROM events \
+             GROUP BY project_path \
+             ORDER BY SUM(saved_bytes) DESC",
+        )
+        .context("preparing stats summary query")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(ProjectSummary {
+                project_path: r.get(0)?,
+                results: r.get(1)?,
+                original_bytes: r.get(2)?,
+                saved_bytes: r.get(3)?,
+                grew_results: r.get(4)?,
+            })
+        })
+        .context("querying stats summary")?;
+    let projects = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collecting stats summary rows")?;
+    Ok(Summary { projects })
 }
 
 #[cfg(test)]
@@ -451,5 +588,118 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    // --- S4 read side: read_summary_in ---
+
+    /// Seed a multi-project store by writing through real `Stats` instances (the same
+    /// path production uses), so the reader is tested against the committed schema.
+    async fn seed(base: &Path, events: &[(&str, u64, i64)]) {
+        // Group by project so each project's rows go through one writer (mirrors the
+        // one-process-per-project reality), then flush via shutdown.
+        let mut by_project: std::collections::BTreeMap<&str, Vec<(u64, i64)>> = Default::default();
+        for &(proj, orig, delta) in events {
+            by_project.entry(proj).or_default().push((orig, delta));
+        }
+        for (proj, rows) in by_project {
+            let stats = Stats::open(base, proj.to_string()).unwrap();
+            let h = stats.handle();
+            for (orig, delta) in rows {
+                h.record(saved(orig, delta));
+            }
+            drop(h);
+            stats.shutdown().await;
+        }
+    }
+
+    /// Multi-project aggregate: per-project results/bytes/% and the grand totals all
+    /// match the seeded data, ordered by bytes saved descending (biggest win first).
+    #[tokio::test]
+    async fn read_summary_aggregates_per_project() {
+        let tmp = TempDir::new("read-multi");
+        seed(
+            tmp.path(),
+            &[
+                ("proj-big", 1000, 600), // 600 saved
+                ("proj-big", 1000, 400), // → proj-big: 2 results, 2000 orig, 1000 saved
+                ("proj-small", 500, 100), // → proj-small: 1 result, 500 orig, 100 saved
+            ],
+        )
+        .await;
+
+        let summary = read_summary_in(tmp.path()).unwrap();
+        assert!(!summary.is_empty());
+        assert_eq!(summary.projects.len(), 2);
+
+        // Ordered by Σsaved desc → proj-big first.
+        let big = &summary.projects[0];
+        assert_eq!(big.project_path, "proj-big");
+        assert_eq!(big.results, 2);
+        assert_eq!(big.original_bytes, 2000);
+        assert_eq!(big.saved_bytes, 1000);
+        assert_eq!(big.grew_results, 0);
+        assert!((big.saved_pct() - 50.0).abs() < 1e-9);
+
+        let small = &summary.projects[1];
+        assert_eq!(small.project_path, "proj-small");
+        assert_eq!(small.results, 1);
+        assert_eq!(small.saved_bytes, 100);
+
+        // Grand totals.
+        let (results, original, saved, grew) = summary.totals();
+        assert_eq!((results, original, saved, grew), (3, 2500, 1100, 0));
+        assert!((summary.total_saved_pct() - 1100.0 / 2500.0 * 100.0).abs() < 1e-9);
+    }
+
+    /// "N results grew" counts negative-delta rows **per project, independent of the
+    /// project's net sign** (locked S4 decision): a project that nets positive can
+    /// still report grew-rows.
+    #[tokio::test]
+    async fn read_summary_counts_grew_rows_sign_independent() {
+        let tmp = TempDir::new("read-grew");
+        seed(
+            tmp.path(),
+            &[
+                ("proj", 1000, 800), // big win
+                ("proj", 20, -15),   // grew (TOON larger) — but project still nets +
+                ("proj", 30, -10),   // grew again
+            ],
+        )
+        .await;
+
+        let summary = read_summary_in(tmp.path()).unwrap();
+        let p = &summary.projects[0];
+        assert_eq!(p.results, 3);
+        assert_eq!(p.saved_bytes, 800 - 15 - 10, "net is still positive");
+        assert!(p.saved_bytes > 0);
+        assert_eq!(p.grew_results, 2, "both grew-rows counted despite net-positive");
+    }
+
+    /// File-absent → graceful empty state, NOT an error, and **no DB is created** by
+    /// the read (the side-effect-free invariant: a reader run before any `--stats`
+    /// serve must not litter an empty store).
+    #[test]
+    fn read_summary_absent_store_is_empty_and_creates_nothing() {
+        let tmp = TempDir::new("read-absent");
+        let base = tmp.path().join("never-served");
+        // Dir doesn't even exist yet.
+        let summary = read_summary_in(&base).unwrap();
+        assert!(summary.is_empty(), "absent store → empty summary, not an error");
+        assert!((summary.total_saved_pct() - 0.0).abs() < 1e-9);
+        assert!(!base.join(DB_FILE).exists(), "read must not create the db");
+        assert!(!base.exists(), "read must not create the store dir");
+    }
+
+    /// A net-negative project (TOON grew more than it shrank) reports a negative
+    /// saved-bytes and a negative %, never coerced to zero — the honest readout.
+    #[tokio::test]
+    async fn read_summary_net_negative_project_reads_signed() {
+        let tmp = TempDir::new("read-neg");
+        seed(tmp.path(), &[("shrinky", 100, 10), ("shrinky", 40, -50)]).await;
+        let summary = read_summary_in(tmp.path()).unwrap();
+        let p = &summary.projects[0];
+        assert_eq!(p.saved_bytes, 10 - 50);
+        assert_eq!(p.grew_results, 1);
+        assert!(p.saved_pct() < 0.0, "net-negative project shows a negative %");
     }
 }

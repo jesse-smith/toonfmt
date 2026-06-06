@@ -32,6 +32,7 @@ USAGE:
     toonfmt --http <url> [auth]               serve an HTTP (Streamable HTTP) upstream
     toonfmt login --http <url>                run the OAuth flow once, persist tokens
     toonfmt update                            self-update an installer-based build
+    toonfmt stats                             show recorded token savings per project
     toonfmt --help | --version
 
 AUTH (HTTP upstreams only):
@@ -141,10 +142,92 @@ pub enum Command {
     Login(LoginArgs),
     /// `toonfmt update`: self-update via the install receipt. Takes no arguments.
     Update,
+    /// `toonfmt stats`: read the opt-in token-savings store and print a per-project
+    /// summary. Takes no arguments; side-effect-free (read-only, never creates the
+    /// store). Empty state when nothing was ever recorded.
+    Stats,
     /// `--help` / `-h` / `help`: print [`USAGE`] to stdout and exit 0.
     Help,
     /// `--version` / `-V`: print the crate version to stdout and exit 0.
     Version,
+}
+
+/// The graceful empty-state line for `toonfmt stats` when nothing was recorded
+/// (store absent, or present but no delivered rows). Per the locked S4 decision this
+/// is a friendly nudge, never a "unable to open database" error.
+pub const STATS_EMPTY: &str =
+    "no stats recorded yet — serve with --stats (or set TOONFMT_STATS=1) to start recording.";
+
+/// Format a byte count as a short human string (`B`/`KB`/`MB`/`GB`, 1024-based).
+/// Signed: a negative delta (a project the transform grew) renders with a leading
+/// `-`. One decimal place above bytes; bare integer for raw bytes.
+fn human_bytes(n: i64) -> String {
+    let neg = n < 0;
+    let v = n.unsigned_abs() as f64;
+    let (val, unit) = if v >= 1024.0 * 1024.0 * 1024.0 {
+        (v / (1024.0 * 1024.0 * 1024.0), "GB")
+    } else if v >= 1024.0 * 1024.0 {
+        (v / (1024.0 * 1024.0), "MB")
+    } else if v >= 1024.0 {
+        (v / 1024.0, "KB")
+    } else {
+        // Raw bytes: no decimal, no unit scaling.
+        return format!("{}{} B", if neg { "-" } else { "" }, v as i64);
+    };
+    format!("{}{:.1} {}", if neg { "-" } else { "" }, val, unit)
+}
+
+/// Render a [`stats::Summary`](crate::stats::Summary) as the human-facing readout:
+/// one line per project (ordered biggest-win-first by the query) plus a TOTAL line.
+/// **Bytes + %, no token figure** (locked Q1: a fabricated token integer would look
+/// tokenizer-derived when it isn't). An empty summary yields [`STATS_EMPTY`].
+///
+/// Pure: takes the already-read summary and returns a string — all IO (the read and
+/// the `println!`) lives in `main`, so this is unit-testable without a DB.
+pub fn format_summary(summary: &crate::stats::Summary) -> String {
+    if summary.is_empty() {
+        return STATS_EMPTY.to_string();
+    }
+
+    let mut out = String::from("toonfmt — token-savings stats (bytes of JSON the model didn't read)\n\n");
+
+    // A grew-suffix only when a project actually grew some results, so the common
+    // all-wins case stays uncluttered.
+    let line = |label: &str, results: i64, original: i64, saved: i64, pct: f64, grew: i64| {
+        let grew_note = if grew > 0 {
+            format!("  ({grew} grew)")
+        } else {
+            String::new()
+        };
+        format!(
+            "  {label:<40}  {results:>5} results  {orig:>10} → saved {saved:>10}  ({pct:>6.1}%){grew_note}\n",
+            orig = human_bytes(original),
+            saved = human_bytes(saved),
+        )
+    };
+
+    for p in &summary.projects {
+        // An empty project_path (CLAUDE_PROJECT_DIR unset at record time) is shown as
+        // a placeholder rather than a blank label.
+        let label = if p.project_path.is_empty() {
+            "(unknown project)"
+        } else {
+            &p.project_path
+        };
+        out.push_str(&line(
+            label,
+            p.results,
+            p.original_bytes,
+            p.saved_bytes,
+            p.saved_pct(),
+            p.grew_results,
+        ));
+    }
+
+    let (results, original, saved, grew) = summary.totals();
+    out.push('\n');
+    out.push_str(&line("TOTAL", results, original, saved, summary.total_saved_pct(), grew));
+    out
 }
 
 /// Is `tok` a meta *flag* (`--help`/`-h`/`--version`/`-V`)?
@@ -201,6 +284,17 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Command> {
                     }
                 },
                 None => Ok(Command::Update),
+            };
+        }
+        Some("stats") => {
+            it.next(); // consume `stats`
+            // Like `update`: no arguments, `--help`/`-h` pre-empts the validation.
+            return match it.next() {
+                Some(tok) => match meta_command(&tok) {
+                    Some(meta) => Ok(meta),
+                    None => bail!("unexpected argument to `stats`: {tok} (usage: toonfmt stats)"),
+                },
+                None => Ok(Command::Stats),
             };
         }
         _ => {}
@@ -711,6 +805,102 @@ mod tests {
     fn update_rejects_extra_args() {
         assert!(parse(&["update", "foo"]).is_err());
         assert!(parse(&["update", "--http", "https://x"]).is_err());
+    }
+
+    // --- stats subcommand ---
+
+    /// `stats` (no args) → Stats.
+    #[test]
+    fn stats_subcommand_well_formed() {
+        assert_eq!(parse(&["stats"]).unwrap(), Command::Stats);
+    }
+
+    /// `stats` takes no arguments — any trailing token is an error.
+    #[test]
+    fn stats_subcommand_rejects_extra_args() {
+        assert!(parse(&["stats", "foo"]).is_err());
+        assert!(parse(&["stats", "--http", "https://x"]).is_err());
+    }
+
+    /// `stats --help` prints help rather than erroring (meta pre-empts validation).
+    #[test]
+    fn stats_subcommand_honors_help() {
+        assert_eq!(parse(&["stats", "--help"]).unwrap(), Command::Help);
+        assert_eq!(parse(&["stats", "-h"]).unwrap(), Command::Help);
+    }
+
+    // --- format_summary (the human readout; bytes + %, no token figure) ---
+
+    use crate::stats::{ProjectSummary, Summary};
+
+    fn proj(path: &str, results: i64, original: i64, saved: i64, grew: i64) -> ProjectSummary {
+        ProjectSummary {
+            project_path: path.to_string(),
+            results,
+            original_bytes: original,
+            saved_bytes: saved,
+            grew_results: grew,
+        }
+    }
+
+    /// Empty summary → the friendly empty-state line, never a DB error.
+    #[test]
+    fn format_summary_empty_is_friendly() {
+        let out = format_summary(&Summary::default());
+        assert_eq!(out, STATS_EMPTY);
+        assert!(!out.to_lowercase().contains("error"));
+        assert!(!out.to_lowercase().contains("unable to open"));
+    }
+
+    /// A populated summary shows each project, a TOTAL line, the % saved, and — the
+    /// locked Q1 invariant — **no token figure** anywhere in the output.
+    #[test]
+    fn format_summary_shows_projects_total_and_no_token_figure() {
+        let summary = Summary {
+            projects: vec![
+                proj("/work/big", 10, 20_000, 8_000, 0),
+                proj("/work/small", 2, 1_000, 250, 0),
+            ],
+        };
+        let out = format_summary(&summary);
+        assert!(out.contains("/work/big"));
+        assert!(out.contains("/work/small"));
+        assert!(out.contains("TOTAL"));
+        // % saved present (big project is 40%).
+        assert!(out.contains("40.0%"), "per-project % shown:\n{out}");
+        // No token *figure* — the locked Q1 invariant. The product framing legitimately
+        // says "token-savings", so we don't ban the word; we ban a fabricated count: a
+        // number labeled "tokens" (plural, e.g. "≈ 8,000 tokens") or the approx glyph.
+        let lower = out.to_lowercase();
+        assert!(!lower.contains("tokens"), "must not present a token count:\n{out}");
+        assert!(!lower.contains("≈"), "no fabricated approx figure");
+    }
+
+    /// "N grew" annotation appears only for projects that actually grew results, and
+    /// is sign-independent (a net-positive project still shows its grew-count).
+    #[test]
+    fn format_summary_annotates_grew_results() {
+        let summary = Summary {
+            projects: vec![
+                proj("/has-grew", 5, 1_000, 600, 2), // net +, but 2 grew
+                proj("/all-wins", 3, 900, 300, 0),
+            ],
+        };
+        let out = format_summary(&summary);
+        // Exactly the grew project carries the note.
+        let grew_line = out.lines().find(|l| l.contains("/has-grew")).unwrap();
+        assert!(grew_line.contains("2 grew"), "grew-count annotated:\n{out}");
+        let wins_line = out.lines().find(|l| l.contains("/all-wins")).unwrap();
+        assert!(!wins_line.contains("grew"), "all-wins project has no grew note");
+    }
+
+    /// An empty `project_path` (CLAUDE_PROJECT_DIR unset when recorded) renders as a
+    /// readable placeholder, not a blank label.
+    #[test]
+    fn format_summary_handles_unknown_project() {
+        let summary = Summary { projects: vec![proj("", 1, 100, 40, 0)] };
+        let out = format_summary(&summary);
+        assert!(out.contains("(unknown project)"), "blank path → placeholder:\n{out}");
     }
 
     // --- bearer resolution (fail-fast), now driven by HttpAuth ---
