@@ -172,6 +172,46 @@ startup on the consent page, so it is opt-in.
 }
 ```
 
+### Token-savings stats (opt-in)
+
+See how many bytes the TOON transform saves. It is **off by default** — the proxy stays a
+silent, zero-overhead passthrough until you opt in, and nothing is ever written to disk
+otherwise. Turn it on with the `--stats` serve flag (or set `TOONFMT_STATS=1`):
+
+```jsonc
+{
+  "mcpServers": {
+    "sql": {
+      "command": "toonfmt",
+      "args": ["--stats", "--", "uvx", "some-sql-mcp", "--db", "..."]
+    }
+  }
+}
+```
+
+While enabled, each converted `tools/call` result records its byte delta to a small
+SQLite store at `~/.toonfmt/stats.db`. Read the cumulative, per-project total any time:
+
+```sh
+toonfmt stats
+```
+
+```text
+toonfmt — token-savings stats (bytes of JSON the model didn't read)
+
+  /home/you/projects/app                      128 results    142.6 KB → saved    84.1 KB  (  59.0%)
+  /home/you/projects/api                       14 results     12.0 KB → saved     -390 B  (  -3.2%)  (2 grew)
+
+  TOTAL                                       142 results    154.6 KB → saved    83.7 KB  (  54.1%)  (2 grew)
+```
+
+The figures are **exact bytes and a bytes-based percentage — never a token count**
+(Anthropic's tokenizer isn't public, so any token number would be fabricated). Only
+savings the model actually reads are counted, deltas are signed (a block TOON makes
+*larger* counts against you, and is flagged as "grew"), and `toonfmt stats` run before you
+ever enable stats just prints a friendly "no stats recorded yet" — it never creates the
+store. See [ARCHITECTURE.md](ARCHITECTURE.md) for the full rationale.
+
 ## How it works
 
 `toonfmt` matches `tools/call` requests to their responses by JSON-RPC `id` and rewrites

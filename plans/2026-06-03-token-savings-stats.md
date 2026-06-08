@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-03  <!-- last worked on (or created); rename on meaningful revisit -->
 **Prior:** plans/2026-06-02-self-update.md (Phase B — self-update)
-**Status:** in progress — Q1–Q3 + project_path provenance all DECIDED; S1–S4 landed (2026-06-05); S5 (docs + cairn-accept) next.
+**Status:** landed 2026-06-08 — Q1–Q3 + project_path provenance DECIDED; S1–S5 all landed; cairn-accept walked + cairn-verify (cargo test + build) and clippy `-D warnings` green on the whole feature. Opt-in token-savings stats (`--stats`/`TOONFMT_STATS`, `toonfmt stats`) shipped.
 
 ## Goal
 Let a user *see* what toonfmt buys them: an **opt-in** readout of how many bytes/tokens the TOON
@@ -174,9 +174,18 @@ no architectural change — the work is *accounting and surfacing*, not *capturi
   passed; clippy `-D warnings` clean; e2e-smoke confirmed a real `--stats` serve writes `/work/demo-
   project 81 B → 35 B (43.2%)` and `toonfmt stats` renders it, while a clean-`$HOME` read prints the
   empty state and creates no `.toonfmt`. cairn-verify (`cargo test` + `cargo build`): PASS.
-- [ ] **S5 — Docs + cairn-accept.** ARCHITECTURE.md (the stats store + the C-dep decision + NFS
-  caveat), README (`--stats`/`TOONFMT_STATS` + `toonfmt stats`), memory note for the RTK-validated
-  SQLite/WAL decision. Run cairn-accept.
+- [x] **S5 — Docs + cairn-accept. DONE 2026-06-08.** ARCHITECTURE.md gained a "Token-savings stats
+  (opt-in)" section (bytes-not-tokens Q1, signed delivered-only Q2, SQLite/WAL append-only store, the
+  RTK validation, the 2nd-C-dep/Turso-rejected decision, the async write model, the read-only
+  side-effect-free reader, and the NFS-softens-WAL caveat) + registered `stats` as the 4th subcommand
+  in Config surface. README gained a user-facing "Token-savings stats (opt-in)" recipe under Use it
+  (`--stats`/`TOONFMT_STATS=1`, `toonfmt stats`) — the sample output is **captured verbatim from a
+  throwaway `format_summary` test, not hand-written**, then the test removed (suite back to 135). New
+  reference memory `stats-store-sqlite-wal-rtk.md` (RTK-validated WAL decision) + MEMORY.md index line;
+  the reconstruction note's "STILL TO CREATE" cleared. cairn-accept walked 2026-06-08: full suite +
+  clippy green, and a live 4-scenario e2e against the real binary (empty-state creates nothing;
+  `--stats` serve records under `CLAUDE_PROJECT_DIR`; readout matches the documented format; **default
+  serve creates no store**; multi-project run confirmed `journal_mode=wal` + per-project grouping).
 
 ## Acceptance criteria
 - Default path (no opt-in) is byte-for-byte and behaviorally identical to today — zero overhead,
