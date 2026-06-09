@@ -5,3 +5,25 @@ coverage:
   range: "80...90"
   round: down
   precision: 2
+
+  # The coverage *regression* gate (the `ci` job no longer fails on the upload
+  # itself — see ci.yml `fail_ci_if_error: false`). These post `codecov/project`
+  # and `codecov/patch` commit statuses, the real teeth on a coverage drop.
+  #
+  # FAIL OPEN on a missing report: when the codecov-action keybase flake
+  # (codecov-action#1876) prevents an upload, there is nothing to compare, so
+  # `if_not_found: success` makes the status green rather than blocking a merge on
+  # an external outage. We deliberately leave `if_ci_failed` UNSET — its default
+  # is `error`, so if the `ci` pipeline itself fails (e.g. a real test failure)
+  # the coverage status also errors and can never launder a red build into green.
+  # Real correctness gates via the Clippy / Tests steps' own exit codes,
+  # independent of Codecov.
+  status:
+    project:
+      default:
+        target: auto # compare against the base commit's coverage
+        threshold: 1% # tolerate ≤1% noise; a larger drop fails the status
+        if_not_found: success # no report (e.g. upload flake) → don't block
+    patch:
+      default:
+        informational: true # report PR-diff coverage; never block on it

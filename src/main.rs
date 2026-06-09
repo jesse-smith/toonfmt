@@ -15,6 +15,7 @@ mod http_upstream;
 mod oauth;
 mod jsonrpc;
 mod proxy;
+mod stats;
 mod transform;
 mod update;
 
@@ -50,7 +51,7 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<ExitCode> {
     match cli::parse_args(std::env::args().skip(1))? {
-        Command::Serve(upstream) => serve(upstream).await,
+        Command::Serve { upstream, stats } => serve(upstream, stats).await,
         Command::Login(args) => login(args).await,
         // `run_update` is a sync fn (the axoupdater `blocking` feature), but
         // `run_sync` calls `block_on` *internally* — which panics if invoked on a
@@ -75,6 +76,15 @@ async fn run() -> Result<ExitCode> {
             println!("toonfmt {}", env!("CARGO_PKG_VERSION"));
             Ok(ExitCode::SUCCESS)
         }
+        // `toonfmt stats`: read the opt-in store and print the per-project summary to
+        // stdout (a human front-door command, not the protocol path). Side-effect-free
+        // — `read_summary` opens read-only and treats an absent store as empty state,
+        // which `format_summary` renders as a friendly nudge. Exit 0 either way.
+        Command::Stats => {
+            let summary = stats::read_summary()?;
+            println!("{}", cli::format_summary(&summary));
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -96,22 +106,51 @@ async fn login(args: LoginArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-async fn serve(upstream: Upstream) -> Result<ExitCode> {
-    match upstream {
-        Upstream::Stdio(cmd) => {
-            let status = proxy::run(cmd).await?;
+async fn serve(upstream: Upstream, stats_flag: bool) -> Result<ExitCode> {
+    // Opt-in resolved here: the `--stats` flag OR the `TOONFMT_STATS=1` env var.
+    // `$CLAUDE_PROJECT_DIR` is read **once** at startup — a toonfmt process serves
+    // one project for its whole life (the env is set by the host before spawn), so
+    // it is process-stable; fall back to the current dir, then "" if neither resolves.
+    // The gate (and degrade-on-error) lives in `stats::open_if_enabled`: when off it
+    // touches nothing, so the default path stays byte-for-byte zero-overhead.
+    let enabled = stats_flag || env_truthy("TOONFMT_STATS");
+    let project_path = std::env::var("CLAUDE_PROJECT_DIR").unwrap_or_else(|_| {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    });
+    let stats = stats::Stats::open_if_enabled(enabled, project_path);
+    let handle = stats.as_ref().map(stats::Stats::handle);
+
+    let result = match upstream {
+        Upstream::Stdio(cmd) => proxy::run(cmd, handle).await.map(|status| {
             // Propagate the child's exit code where possible.
-            let code = status.code().unwrap_or(1);
-            Ok(ExitCode::from(code as u8))
-        }
-        Upstream::Http(http) => serve_http(http).await,
+            ExitCode::from(status.code().unwrap_or(1) as u8)
+        }),
+        Upstream::Http(http) => serve_http(http, handle).await,
+    };
+
+    // Flush + join the writer before exit so in-queue events are persisted. Done
+    // regardless of the serve result (a failed serve may still have recorded events).
+    if let Some(s) = stats {
+        s.shutdown().await;
+    }
+    result
+}
+
+/// Is the named env var set to a truthy value (`1`, `true`, `yes`, case-insensitive)?
+/// Used for `TOONFMT_STATS` — an unset, empty, or `0`/`false` value is off.
+fn env_truthy(var: &str) -> bool {
+    match std::env::var(var) {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
+        Err(_) => false,
     }
 }
 
 /// Construct the right concrete rmcp transport for the chosen auth mode, then run
 /// the shared generic driver. Auth selection is a **construction-time** branch here
 /// — `http_upstream::run` is generic over the transport and never sees auth mode.
-async fn serve_http(http: HttpUpstream) -> Result<ExitCode> {
+async fn serve_http(http: HttpUpstream, stats: Option<stats::StatsHandle>) -> Result<ExitCode> {
     let config = StreamableHttpClientTransportConfig::with_uri(http.url.clone());
     match &http.auth {
         // OAuth: load the cached token (fail-fast if absent — never launches a
@@ -120,7 +159,7 @@ async fn serve_http(http: HttpUpstream) -> Result<ExitCode> {
             let store = FileCredentialStore::for_url(&http.url, http.profile.as_deref())?;
             let auth_client = oauth::serve_auth_client(&http.url, store).await?;
             let transport = StreamableHttpClientTransport::with_client(auth_client, config);
-            http_upstream::run(transport).await?;
+            http_upstream::run(transport, stats).await?;
         }
         // Interactive OAuth (Slice C): same as OAuth when a token is stored; when
         // none is, run the authorization-code flow inline (auto-launch the browser)
@@ -132,7 +171,7 @@ async fn serve_http(http: HttpUpstream) -> Result<ExitCode> {
                 oauth::serve_auth_client_interactive(&http.url, store, open_in_browser_logged)
                     .await?;
             let transport = StreamableHttpClientTransport::with_client(auth_client, config);
-            http_upstream::run(transport).await?;
+            http_upstream::run(transport, stats).await?;
         }
         // Bearer / no-auth: resolve the token (fail-fast on a misconfigured
         // `--bearer-env`) and set it as the static auth header.
@@ -142,7 +181,7 @@ async fn serve_http(http: HttpUpstream) -> Result<ExitCode> {
                 None => config,
             };
             let transport = StreamableHttpClientTransport::from_config(config);
-            http_upstream::run(transport).await?;
+            http_upstream::run(transport, stats).await?;
         }
     }
     Ok(ExitCode::SUCCESS)

@@ -42,8 +42,12 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: codecov.json
-          # true now that CODECOV_TOKEN is set and a clean authenticated upload was
-          # verified on PR #3: a broken upload should fail the run rather than rot
-          # silently. (Was false for the first run so a token/config hiccup couldn't
-          # redden CI before we'd seen one succeed.)
-          fail_ci_if_error: true
+          # false: the upload is best-effort telemetry, not a correctness gate. The
+          # codecov-action wrapper periodically fails importing Codecov's PGP key from
+          # keybase (codecov-action#1876 — "Total number processed: 0" → "Can't check
+          # signature: No public key"), an EXTERNAL flake that must not redden CI. This
+          # flag scopes ONLY to this step; Clippy/Tests above keep their own exit codes
+          # and still fail the job on a real regression. Coverage *drops* are gated
+          # server-side in codecov.yml (status.project), which fails OPEN
+          # (if_not_found/if_error: success) when a flaky upload never lands.
+          fail_ci_if_error: false
