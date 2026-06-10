@@ -49,7 +49,10 @@ pub fn run_update() -> Result<()> {
             Ok(())
         }
         Ok(None) => {
-            eprintln!("toonfmt v{} is already up to date.", env!("CARGO_PKG_VERSION"));
+            eprintln!(
+                "toonfmt v{} is already up to date.",
+                env!("CARGO_PKG_VERSION")
+            );
             Ok(())
         }
         Err(e) => {
@@ -200,7 +203,9 @@ mod tests {
         // "no". A real failure that mentions "receipt" and contains an incidental
         // "no" (here inside "diagnostic"/"cannot") must NOT be swallowed as the
         // no-receipt (→ Ok) path — it has to surface.
-        assert!(!is_no_receipt_msg("receipt diagnostic: cannot reach server"));
+        assert!(!is_no_receipt_msg(
+            "receipt diagnostic: cannot reach server"
+        ));
     }
 
     // --- is_network_error_msg ---
@@ -239,7 +244,9 @@ mod tests {
 
     #[test]
     fn no_installer_matches_installer_not_found() {
-        assert!(is_no_installer_error_msg("installer not found for this platform"));
+        assert!(is_no_installer_error_msg(
+            "installer not found for this platform"
+        ));
     }
 
     #[test]

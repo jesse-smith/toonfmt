@@ -235,7 +235,12 @@ mod tests {
         // token_response: None keeps the fixture independent of oauth2's token
         // types; round-trip fidelity of the envelope (client_id, scopes) is what
         // the store is responsible for.
-        StoredCredentials::new(client_id.to_string(), None, vec!["mcp".to_string()], Some(42))
+        StoredCredentials::new(
+            client_id.to_string(),
+            None,
+            vec!["mcp".to_string()],
+            Some(42),
+        )
     }
 
     #[tokio::test]
@@ -275,7 +280,11 @@ mod tests {
         let tmp = TempDir::new("isolation");
         let a = FileCredentialStore::new(tmp.path(), "https://a.example/mcp", None);
         let b = FileCredentialStore::new(tmp.path(), "https://b.example/mcp", None);
-        assert_ne!(a.path(), b.path(), "different URLs must map to different files");
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "different URLs must map to different files"
+        );
 
         a.save(creds("client-a")).await.unwrap();
         b.save(creds("client-b")).await.unwrap();
@@ -292,7 +301,11 @@ mod tests {
         let store = FileCredentialStore::new(tmp.path(), "https://x.example/mcp", None);
         store.save(creds("c")).await.unwrap();
 
-        let file_mode = std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
+        let file_mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(file_mode, 0o600, "credential file must be private (0600)");
 
         let dir_mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777;
@@ -302,8 +315,15 @@ mod tests {
         // OpenOptions applies only at creation, so this guards the subtle case the
         // TOCTOU fix relies on — re-saving an existing file doesn't widen its perms.
         store.save(creds("rotated")).await.unwrap();
-        let file_mode = std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
-        assert_eq!(file_mode, 0o600, "credential file must stay 0600 across re-save");
+        let file_mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            file_mode, 0o600,
+            "credential file must stay 0600 across re-save"
+        );
     }
 
     #[tokio::test]
@@ -395,7 +415,10 @@ mod tests {
         let url = "https://x.example/mcp";
         let work = key_hash(Some("work"), url);
         let personal = key_hash(Some("personal"), url);
-        assert_ne!(work, personal, "different profiles for one URL must not collide");
+        assert_ne!(
+            work, personal,
+            "different profiles for one URL must not collide"
+        );
     }
 
     #[test]
@@ -411,7 +434,10 @@ mod tests {
         // any other string — no slashes reach the filesystem, no nested dirs.
         let h = key_hash(Some("/Users/me/project"), "https://x.example/mcp");
         assert_eq!(h.len(), 64);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "stem is flat hex, no '/'");
+        assert!(
+            h.chars().all(|c| c.is_ascii_hexdigit()),
+            "stem is flat hex, no '/'"
+        );
     }
 
     #[test]

@@ -116,7 +116,10 @@ impl Stats {
         let writer = tokio::task::spawn_blocking(move || writer_loop(conn, rx, project_path));
 
         Ok(Stats {
-            handle: StatsHandle { tx, dropped: Arc::new(AtomicU64::new(0)) },
+            handle: StatsHandle {
+                tx,
+                dropped: Arc::new(AtomicU64::new(0)),
+            },
             writer,
         })
     }
@@ -143,11 +146,7 @@ impl Stats {
     /// Gate + degrade core, with the base dir injected so tests can assert the
     /// off-path creates nothing under a tempdir. `base_dir` is a `Result` so a failed
     /// `$HOME` resolution is only consulted on the enabled path (disabled never looks).
-    fn open_gated(
-        enabled: bool,
-        base_dir: Result<PathBuf>,
-        project_path: String,
-    ) -> Option<Stats> {
+    fn open_gated(enabled: bool, base_dir: Result<PathBuf>, project_path: String) -> Option<Stats> {
         if !enabled {
             return None; // off → nothing happens, byte-for-byte zero overhead
         }
@@ -225,7 +224,12 @@ fn writer_loop(conn: Connection, mut rx: mpsc::Receiver<Savings>, project_path: 
         let res = conn.execute(
             "INSERT INTO events (ts, project_path, original_bytes, saved_bytes) \
              VALUES (?1, ?2, ?3, ?4)",
-            params![now_unix(), project_path, s.original_bytes as i64, s.saved_bytes],
+            params![
+                now_unix(),
+                project_path,
+                s.original_bytes as i64,
+                s.saved_bytes
+            ],
         );
         if let Err(e) = res {
             tracing::warn!(error = %e, "stats: INSERT failed; dropping event");
@@ -297,7 +301,12 @@ impl Summary {
     /// projects — no second query needed).
     pub fn totals(&self) -> (i64, i64, i64, i64) {
         self.projects.iter().fold((0, 0, 0, 0), |(r, o, s, g), p| {
-            (r + p.results, o + p.original_bytes, s + p.saved_bytes, g + p.grew_results)
+            (
+                r + p.results,
+                o + p.original_bytes,
+                s + p.saved_bytes,
+                g + p.grew_results,
+            )
         })
     }
 
@@ -404,7 +413,10 @@ mod tests {
     }
 
     fn saved(original: u64, delta: i64) -> Savings {
-        Savings { original_bytes: original, saved_bytes: delta }
+        Savings {
+            original_bytes: original,
+            saved_bytes: delta,
+        }
     }
 
     /// `(count, Σsaved_bytes, Σoriginal_bytes)` from a fresh read connection on the
@@ -424,7 +436,13 @@ mod tests {
     /// is deterministic (no live writer racing to empty it).
     fn channel_for_test(cap: usize) -> (StatsHandle, mpsc::Receiver<Savings>) {
         let (tx, rx) = mpsc::channel(cap);
-        (StatsHandle { tx, dropped: Arc::new(AtomicU64::new(0)) }, rx)
+        (
+            StatsHandle {
+                tx,
+                dropped: Arc::new(AtomicU64::new(0)),
+            },
+            rx,
+        )
     }
 
     /// The writer drains every enqueued event before exit: N records → exactly N rows,
@@ -538,7 +556,9 @@ mod tests {
         // Per-project grouping (what S4 will read) sees both projects distinctly.
         let conn = Connection::open(tmp.path().join(DB_FILE)).unwrap();
         let projects: i64 = conn
-            .query_row("SELECT COUNT(DISTINCT project_path) FROM events", [], |r| r.get(0))
+            .query_row("SELECT COUNT(DISTINCT project_path) FROM events", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(projects, 2);
     }
@@ -554,7 +574,10 @@ mod tests {
         let stats = Stats::open_gated(false, Ok(dir.clone()), "p".to_string());
         assert!(stats.is_none(), "disabled → None");
         assert!(!dir.exists(), "disabled gate must not create the store dir");
-        assert!(!dir.join(DB_FILE).exists(), "disabled gate must not create the db");
+        assert!(
+            !dir.join(DB_FILE).exists(),
+            "disabled gate must not create the db"
+        );
     }
 
     /// Enabled but the base dir can't resolve / can't be created → the gate logs and
@@ -569,7 +592,10 @@ mod tests {
         let unusable = blocker.join("nested");
 
         let stats = Stats::open_gated(true, Ok(unusable), "p".to_string());
-        assert!(stats.is_none(), "an open failure must degrade to None, not panic/propagate");
+        assert!(
+            stats.is_none(),
+            "an open failure must degrade to None, not panic/propagate"
+        );
 
         // Also: an unresolved base dir (the `$HOME`-unset analogue) degrades too.
         let stats = Stats::open_gated(true, Err(anyhow!("no home")), "p".to_string());
@@ -620,8 +646,8 @@ mod tests {
         seed(
             tmp.path(),
             &[
-                ("proj-big", 1000, 600), // 600 saved
-                ("proj-big", 1000, 400), // → proj-big: 2 results, 2000 orig, 1000 saved
+                ("proj-big", 1000, 600),  // 600 saved
+                ("proj-big", 1000, 400),  // → proj-big: 2 results, 2000 orig, 1000 saved
                 ("proj-small", 500, 100), // → proj-small: 1 result, 500 orig, 100 saved
             ],
         )
@@ -672,7 +698,10 @@ mod tests {
         assert_eq!(p.results, 3);
         assert_eq!(p.saved_bytes, 800 - 15 - 10, "net is still positive");
         assert!(p.saved_bytes > 0);
-        assert_eq!(p.grew_results, 2, "both grew-rows counted despite net-positive");
+        assert_eq!(
+            p.grew_results, 2,
+            "both grew-rows counted despite net-positive"
+        );
     }
 
     /// File-absent → graceful empty state, NOT an error, and **no DB is created** by
@@ -684,7 +713,10 @@ mod tests {
         let base = tmp.path().join("never-served");
         // Dir doesn't even exist yet.
         let summary = read_summary_in(&base).unwrap();
-        assert!(summary.is_empty(), "absent store → empty summary, not an error");
+        assert!(
+            summary.is_empty(),
+            "absent store → empty summary, not an error"
+        );
         assert!((summary.total_saved_pct() - 0.0).abs() < 1e-9);
         assert!(!base.join(DB_FILE).exists(), "read must not create the db");
         assert!(!base.exists(), "read must not create the store dir");
@@ -700,6 +732,9 @@ mod tests {
         let p = &summary.projects[0];
         assert_eq!(p.saved_bytes, 10 - 50);
         assert_eq!(p.grew_results, 1);
-        assert!(p.saved_pct() < 0.0, "net-negative project shows a negative %");
+        assert!(
+            p.saved_pct() < 0.0,
+            "net-negative project shows a negative %"
+        );
     }
 }

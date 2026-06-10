@@ -51,7 +51,9 @@ pub fn tools_call_result(mut value: Value) -> Option<(String, Savings)> {
     }
 
     // 2. `result.content` must be an array, else None.
-    let content = result_obj.get_mut("content").and_then(Value::as_array_mut)?;
+    let content = result_obj
+        .get_mut("content")
+        .and_then(Value::as_array_mut)?;
 
     // 3. Re-encode each convertible text block as TOON, retaining the parsed
     //    `Value` for the equality gate. Per-block fallback: a block that doesn't
@@ -191,13 +193,17 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).unwrap();
 
         let expected = toon_format::encode_default(&json!({"a": 1, "b": 2})).unwrap();
-        assert_eq!(parsed["result"]["content"][0]["text"].as_str().unwrap(), expected);
+        assert_eq!(
+            parsed["result"]["content"][0]["text"].as_str().unwrap(),
+            expected
+        );
     }
 
     /// (c) Prose text → None (nothing convertible, forward original bytes).
     #[test]
     fn prose_block_returns_none() {
-        let env = envelope(json!({"content": [{"type": "text", "text": "This is a plain answer."}]}));
+        let env =
+            envelope(json!({"content": [{"type": "text", "text": "This is a plain answer."}]}));
         assert!(tools_call_result(env).is_none());
     }
 
@@ -221,7 +227,10 @@ mod tests {
             parsed["result"]["content"][0]["text"].as_str().unwrap(),
             toon_format::encode_default(&inner).unwrap()
         );
-        assert_eq!(parsed["result"]["content"][1]["text"], json!("just words here"));
+        assert_eq!(
+            parsed["result"]["content"][1]["text"],
+            json!("just words here")
+        );
         assert_eq!(
             parsed["result"]["content"][2],
             json!({"type": "image", "data": "base64==", "mimeType": "image/png"})
@@ -391,7 +400,10 @@ mod tests {
         let (_, savings) = tools_call_result(env).unwrap();
         assert_eq!(savings.original_bytes, text.len() as u64);
         assert_eq!(savings.saved_bytes, text.len() as i64 - toon.len() as i64);
-        assert!(savings.saved_bytes > 0, "a uniform-object array should shrink under TOON");
+        assert!(
+            savings.saved_bytes > 0,
+            "a uniform-object array should shrink under TOON"
+        );
     }
 
     /// (s2) Delivered but TOON is *larger* → `saved_bytes` is negative. Uses a
@@ -402,13 +414,19 @@ mod tests {
         let inner = json!({"items": [{"a": 1}, {"b": 2, "c": 3}]});
         let text = serde_json::to_string(&inner).unwrap();
         let toon = toon_format::encode_default(&inner).unwrap();
-        assert!(toon.len() > text.len(), "fixture precondition: TOON larger than JSON");
+        assert!(
+            toon.len() > text.len(),
+            "fixture precondition: TOON larger than JSON"
+        );
         let env = envelope(json!({"content": [{"type": "text", "text": text.clone()}]}));
 
         let (_, savings) = tools_call_result(env).unwrap();
         assert_eq!(savings.original_bytes, text.len() as u64);
         assert_eq!(savings.saved_bytes, text.len() as i64 - toon.len() as i64);
-        assert!(savings.saved_bytes < 0, "TOON-larger block must post a negative delta");
+        assert!(
+            savings.saved_bytes < 0,
+            "TOON-larger block must post a negative delta"
+        );
     }
 
     /// (s3) Strip path (structuredContent equal → removed) → delivered, exact.

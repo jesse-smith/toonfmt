@@ -12,8 +12,8 @@
 mod cli;
 mod credential_store;
 mod http_upstream;
-mod oauth;
 mod jsonrpc;
+mod oauth;
 mod proxy;
 mod stats;
 mod transform;
@@ -59,12 +59,10 @@ async fn run() -> Result<ExitCode> {
         // it on a blocking thread where no runtime is active. It returns `Ok(())`
         // for the graceful no-receipt / already-current cases, `Err` only on real
         // failures.
-        Command::Update => {
-            tokio::task::spawn_blocking(update::run_update)
-                .await
-                .context("update task panicked")?
-                .map(|()| ExitCode::SUCCESS)
-        }
+        Command::Update => tokio::task::spawn_blocking(update::run_update)
+            .await
+            .context("update task panicked")?
+            .map(|()| ExitCode::SUCCESS),
         // Meta commands: print to stdout (the human front door, not the protocol
         // channel — but help/version never coexist with a serve session, so stdout
         // is correct and conventional here) and exit 0.
@@ -102,7 +100,10 @@ async fn login(args: LoginArgs) -> Result<ExitCode> {
         creds.client_id,
         store.path().display(),
     );
-    eprintln!("toonfmt: you can now serve with `--http {} --oauth`", args.url);
+    eprintln!(
+        "toonfmt: you can now serve with `--http {} --oauth`",
+        args.url
+    );
     Ok(ExitCode::SUCCESS)
 }
 

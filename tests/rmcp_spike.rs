@@ -219,8 +219,16 @@ fn routing_map_client_outbound_methods() {
     // And the method name + params must survive the Custom round-trip.
     let typed = from_value::<ClientJsonRpcMessage>(bogus.clone()).expect("x/bogus via Custom");
     let back = to_value(&typed).unwrap();
-    assert_eq!(back["method"], json!("x/bogus"), "Custom must preserve method");
-    assert_eq!(back["params"], json!({"foo":1}), "Custom must preserve params");
+    assert_eq!(
+        back["method"],
+        json!("x/bogus"),
+        "Custom must preserve method"
+    );
+    assert_eq!(
+        back["params"],
+        json!({"foo":1}),
+        "Custom must preserve params"
+    );
 }
 
 /// A server→client **request** with an unknown method (the GET-stream surface:
@@ -276,8 +284,7 @@ async fn transport_drivable_raw_and_handshake_order() {
         .expect("port is a number");
 
     let url = format!("http://127.0.0.1:{port}/mcp");
-    let mut transport =
-        StreamableHttpClientTransport::from_uri(url.as_str());
+    let mut transport = StreamableHttpClientTransport::from_uri(url.as_str());
 
     // (1)+(2): handshake in the worker's required order.
     let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
@@ -291,7 +298,10 @@ async fn transport_drivable_raw_and_handshake_order() {
     let init_resp = transport.receive().await.expect("receive InitializeResult");
     let init_resp_v = to_value(&init_resp).unwrap();
     eprintln!("[transport] initialize result: {init_resp_v}");
-    assert_eq!(init_resp_v["result"]["protocolVersion"], json!("2025-03-26"));
+    assert_eq!(
+        init_resp_v["result"]["protocolVersion"],
+        json!("2025-03-26")
+    );
 
     let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
     transport
@@ -306,7 +316,10 @@ async fn transport_drivable_raw_and_handshake_order() {
         .send(from_value::<ClientJsonRpcMessage>(call).unwrap())
         .await
         .expect("send tools/call");
-    let resp = transport.receive().await.expect("receive tools/call result");
+    let resp = transport
+        .receive()
+        .await
+        .expect("receive tools/call result");
     let resp_v = to_value(&resp).unwrap();
     eprintln!("[transport] tools/call result over wire: {resp_v}");
     let text = resp_v["result"]["content"][0]["text"]

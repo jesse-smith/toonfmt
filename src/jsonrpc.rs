@@ -157,7 +157,12 @@ mod tests {
     #[test]
     fn parses_response() {
         let m = parse_line(r#"{"jsonrpc":"2.0","id":7,"result":{"ok":true}}"#);
-        assert_eq!(m, Message::Response { id: RequestId::Num(7) });
+        assert_eq!(
+            m,
+            Message::Response {
+                id: RequestId::Num(7)
+            }
+        );
     }
 
     #[test]
@@ -193,12 +198,19 @@ mod tests {
         let wire = "100000000000000000000"; // > i64::MAX
         let req = parse_line(&format!(r#"{{"jsonrpc":"2.0","id":{wire},"method":"x"}}"#));
         let resp = parse_line(&format!(r#"{{"jsonrpc":"2.0","id":{wire},"result":{{}}}}"#));
-        let (Message::Request { id: req_id, .. }, Message::Response { id: resp_id }) = (&req, &resp)
+        let (Message::Request { id: req_id, .. }, Message::Response { id: resp_id }) =
+            (&req, &resp)
         else {
             panic!("expected Request + Response, got {req:?} / {resp:?}");
         };
-        assert!(matches!(req_id, RequestId::Other(_)), "big id → Other, got {req_id:?}");
-        assert_eq!(req_id, resp_id, "same wire id must yield the same correlation key");
+        assert!(
+            matches!(req_id, RequestId::Other(_)),
+            "big id → Other, got {req_id:?}"
+        );
+        assert_eq!(
+            req_id, resp_id,
+            "same wire id must yield the same correlation key"
+        );
 
         // And the key round-trips through the tracker like any other id.
         let t = RequestTracker::new();
@@ -227,7 +239,12 @@ mod tests {
         // The downstream path classifies an already-parsed Value (no re-parse).
         let v: Value =
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":3,"result":{"content":[]}}"#).unwrap();
-        assert_eq!(classify(&v), Message::Response { id: RequestId::Num(3) });
+        assert_eq!(
+            classify(&v),
+            Message::Response {
+                id: RequestId::Num(3)
+            }
+        );
         // Non-object value is Other, same as the non-JSON line path.
         assert_eq!(classify(&Value::Array(vec![])), Message::Other);
     }
@@ -249,7 +266,10 @@ mod tests {
     fn tracker_take_consumes() {
         let t = RequestTracker::new();
         t.record_request(RequestId::Str("x".into()), "initialize".into());
-        assert_eq!(t.take_method(&RequestId::Str("x".into())), Some("initialize".into()));
+        assert_eq!(
+            t.take_method(&RequestId::Str("x".into())),
+            Some("initialize".into())
+        );
         // second take returns None — entry was consumed
         assert_eq!(t.take_method(&RequestId::Str("x".into())), None);
     }

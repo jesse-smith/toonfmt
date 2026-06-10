@@ -210,11 +210,8 @@ async fn http_upstream_transforms_across_framings() {
     // Clean teardown: closing stdin ends the driver's read loop → it exits.
     drop(stdin);
     let mut leftover = String::new();
-    let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        stdout.read_to_string(&mut leftover),
-    )
-    .await;
+    let _ =
+        tokio::time::timeout(Duration::from_secs(5), stdout.read_to_string(&mut leftover)).await;
     let _ = child.wait().await;
     stub.kill().await.ok();
 }

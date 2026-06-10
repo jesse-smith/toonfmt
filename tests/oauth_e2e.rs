@@ -124,7 +124,10 @@ async fn run_login(url: &str, home: &TempHome) {
         .await
         .expect("toonfmt login completed within 20s")
         .expect("await toonfmt login");
-    assert!(status.success(), "toonfmt login should succeed, got {status}");
+    assert!(
+        status.success(),
+        "toonfmt login should succeed, got {status}"
+    );
 }
 
 /// Read newline-delimited JSON-RPC responses from toonfmt's stdout until all
@@ -339,9 +342,7 @@ async fn explicit_oauth_login_persist_serve_toon_reuse() {
         "persisted client_id should match the stub's dynamic registration"
     );
     assert!(
-        stored["token_response"]["access_token"]
-            .as_str()
-            .is_some(),
+        stored["token_response"]["access_token"].as_str().is_some(),
         "persisted credentials must carry an access token: {stored}"
     );
 

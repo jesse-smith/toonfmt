@@ -138,7 +138,10 @@ pub enum Command {
     /// Run the proxy. `stats` enables the opt-in token-savings store (`--stats`, or
     /// `TOONFMT_STATS=1` OR'd in by `main`); when false the default zero-overhead
     /// passthrough opens no store.
-    Serve { upstream: Upstream, stats: bool },
+    Serve {
+        upstream: Upstream,
+        stats: bool,
+    },
     Login(LoginArgs),
     /// `toonfmt update`: self-update via the install receipt. Takes no arguments.
     Update,
@@ -189,7 +192,8 @@ pub fn format_summary(summary: &crate::stats::Summary) -> String {
         return STATS_EMPTY.to_string();
     }
 
-    let mut out = String::from("toonfmt — token-savings stats (bytes of JSON the model didn't read)\n\n");
+    let mut out =
+        String::from("toonfmt — token-savings stats (bytes of JSON the model didn't read)\n\n");
 
     // A grew-suffix only when a project actually grew some results, so the common
     // all-wins case stays uncluttered.
@@ -226,7 +230,14 @@ pub fn format_summary(summary: &crate::stats::Summary) -> String {
 
     let (results, original, saved, grew) = summary.totals();
     out.push('\n');
-    out.push_str(&line("TOTAL", results, original, saved, summary.total_saved_pct(), grew));
+    out.push_str(&line(
+        "TOTAL",
+        results,
+        original,
+        saved,
+        summary.total_saved_pct(),
+        grew,
+    ));
     out
 }
 
@@ -327,12 +338,16 @@ fn parse_login(args: impl Iterator<Item = String>) -> Result<Command> {
                 };
                 profile = Some(p);
             }
-            other => bail!("unexpected argument to `login`: {other} (usage: toonfmt login --http <url> [--profile <name>])"),
+            other => bail!(
+                "unexpected argument to `login`: {other} (usage: toonfmt login --http <url> [--profile <name>])"
+            ),
         }
     }
     match url {
         Some(url) => Ok(Command::Login(LoginArgs { url, profile })),
-        None => bail!("login requires an upstream; usage: toonfmt login --http <url> [--profile <name>]"),
+        None => bail!(
+            "login requires an upstream; usage: toonfmt login --http <url> [--profile <name>]"
+        ),
     }
 }
 
@@ -400,7 +415,9 @@ fn parse_serve(args: impl Iterator<Item = String>) -> Result<Command> {
             // `--oauth` (same reuse path, only the missing-token case differs), so
             // giving both is redundant-but-harmless and resolves to interactive.
             if bearer_env.is_some() && (oauth || oauth_interactive) {
-                bail!("--bearer-env and --oauth/--oauth-interactive are mutually exclusive (pick one auth mode)");
+                bail!(
+                    "--bearer-env and --oauth/--oauth-interactive are mutually exclusive (pick one auth mode)"
+                );
             }
             let auth = match (bearer_env, oauth_interactive, oauth) {
                 (Some(env), _, _) => HttpAuth::Bearer { env },
@@ -538,7 +555,12 @@ mod tests {
     fn http_url_with_bearer_env() {
         let h = http(&["--http", "https://x.example/mcp", "--bearer-env", "TOK"]);
         assert_eq!(h.url, "https://x.example/mcp");
-        assert_eq!(h.auth, HttpAuth::Bearer { env: "TOK".to_string() });
+        assert_eq!(
+            h.auth,
+            HttpAuth::Bearer {
+                env: "TOK".to_string()
+            }
+        );
     }
 
     /// `--http <url> --oauth` → OAuth auth mode.
@@ -575,8 +597,26 @@ mod tests {
         // Order-independent.
         assert!(parse(&["--http", "https://x", "--oauth", "--bearer-env", "TOK"]).is_err());
         // --oauth-interactive is an OAuth mode too: also exclusive with bearer.
-        assert!(parse(&["--http", "https://x", "--bearer-env", "TOK", "--oauth-interactive"]).is_err());
-        assert!(parse(&["--http", "https://x", "--oauth-interactive", "--bearer-env", "TOK"]).is_err());
+        assert!(
+            parse(&[
+                "--http",
+                "https://x",
+                "--bearer-env",
+                "TOK",
+                "--oauth-interactive"
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "--http",
+                "https://x",
+                "--oauth-interactive",
+                "--bearer-env",
+                "TOK"
+            ])
+            .is_err()
+        );
     }
 
     /// `--oauth` / `--oauth-interactive` on the stdio form → error.
@@ -646,7 +686,13 @@ mod tests {
     /// `--profile` on an OAuth HTTP upstream → carried on the upstream.
     #[test]
     fn profile_on_oauth_http() {
-        let h = http(&["--http", "https://x.example/mcp", "--oauth", "--profile", "work"]);
+        let h = http(&[
+            "--http",
+            "https://x.example/mcp",
+            "--oauth",
+            "--profile",
+            "work",
+        ]);
         assert_eq!(h.profile.as_deref(), Some("work"));
         assert_eq!(h.auth, HttpAuth::OAuth);
     }
@@ -655,7 +701,11 @@ mod tests {
     #[test]
     fn profile_on_oauth_interactive_http() {
         let h = http(&[
-            "--http", "https://x.example/mcp", "--oauth-interactive", "--profile", "personal",
+            "--http",
+            "https://x.example/mcp",
+            "--oauth-interactive",
+            "--profile",
+            "personal",
         ]);
         assert_eq!(h.profile.as_deref(), Some("personal"));
         assert_eq!(h.auth, HttpAuth::OAuthInteractive);
@@ -672,7 +722,11 @@ mod tests {
     #[test]
     fn profile_accepts_path_value() {
         let h = http(&[
-            "--http", "https://x.example/mcp", "--oauth", "--profile", "/Users/me/project",
+            "--http",
+            "https://x.example/mcp",
+            "--oauth",
+            "--profile",
+            "/Users/me/project",
         ]);
         assert_eq!(h.profile.as_deref(), Some("/Users/me/project"));
     }
@@ -680,7 +734,15 @@ mod tests {
     /// `login --profile` → carried on LoginArgs.
     #[test]
     fn profile_on_login() {
-        match parse(&["login", "--http", "https://x.example/mcp", "--profile", "work"]).unwrap() {
+        match parse(&[
+            "login",
+            "--http",
+            "https://x.example/mcp",
+            "--profile",
+            "work",
+        ])
+        .unwrap()
+        {
             Command::Login(LoginArgs { url, profile }) => {
                 assert_eq!(url, "https://x.example/mcp");
                 assert_eq!(profile.as_deref(), Some("work"));
@@ -697,7 +759,15 @@ mod tests {
         assert!(parse(&["--http", "https://x", "--profile", "work"]).is_err());
         // with --bearer-env
         assert!(
-            parse(&["--http", "https://x", "--bearer-env", "TOK", "--profile", "work"]).is_err()
+            parse(&[
+                "--http",
+                "https://x",
+                "--bearer-env",
+                "TOK",
+                "--profile",
+                "work"
+            ])
+            .is_err()
         );
         // stdio `--` form
         assert!(parse(&["--profile", "work", "--", "cat"]).is_err());
@@ -729,7 +799,14 @@ mod tests {
     /// `--stats` is position-independent and composes with auth flags.
     #[test]
     fn stats_flag_position_independent() {
-        assert!(serve_stats(&["--http", "https://x", "--oauth", "--stats", "--profile", "p"]));
+        assert!(serve_stats(&[
+            "--http",
+            "https://x",
+            "--oauth",
+            "--stats",
+            "--profile",
+            "p"
+        ]));
         // and the upstream still parses correctly alongside it
         let h = http(&["--http", "https://x", "--stats", "--oauth"]);
         assert_eq!(h.auth, HttpAuth::OAuth);
@@ -872,7 +949,10 @@ mod tests {
         // says "token-savings", so we don't ban the word; we ban a fabricated count: a
         // number labeled "tokens" (plural, e.g. "≈ 8,000 tokens") or the approx glyph.
         let lower = out.to_lowercase();
-        assert!(!lower.contains("tokens"), "must not present a token count:\n{out}");
+        assert!(
+            !lower.contains("tokens"),
+            "must not present a token count:\n{out}"
+        );
         assert!(!lower.contains("≈"), "no fabricated approx figure");
     }
 
@@ -891,16 +971,24 @@ mod tests {
         let grew_line = out.lines().find(|l| l.contains("/has-grew")).unwrap();
         assert!(grew_line.contains("2 grew"), "grew-count annotated:\n{out}");
         let wins_line = out.lines().find(|l| l.contains("/all-wins")).unwrap();
-        assert!(!wins_line.contains("grew"), "all-wins project has no grew note");
+        assert!(
+            !wins_line.contains("grew"),
+            "all-wins project has no grew note"
+        );
     }
 
     /// An empty `project_path` (CLAUDE_PROJECT_DIR unset when recorded) renders as a
     /// readable placeholder, not a blank label.
     #[test]
     fn format_summary_handles_unknown_project() {
-        let summary = Summary { projects: vec![proj("", 1, 100, 40, 0)] };
+        let summary = Summary {
+            projects: vec![proj("", 1, 100, 40, 0)],
+        };
         let out = format_summary(&summary);
-        assert!(out.contains("(unknown project)"), "blank path → placeholder:\n{out}");
+        assert!(
+            out.contains("(unknown project)"),
+            "blank path → placeholder:\n{out}"
+        );
     }
 
     // --- bearer resolution (fail-fast), now driven by HttpAuth ---
@@ -912,7 +1000,9 @@ mod tests {
         let var = "TOONFMT_TEST_BEARER_B1";
         let h = HttpUpstream {
             url: "https://x.example/mcp".to_string(),
-            auth: HttpAuth::Bearer { env: var.to_string() },
+            auth: HttpAuth::Bearer {
+                env: var.to_string(),
+            },
             profile: None,
         };
 
@@ -926,7 +1016,10 @@ mod tests {
 
         // Present → resolved.
         unsafe { std::env::set_var(var, "secret-token") };
-        assert_eq!(h.resolve_bearer().unwrap(), Some("secret-token".to_string()));
+        assert_eq!(
+            h.resolve_bearer().unwrap(),
+            Some("secret-token".to_string())
+        );
 
         unsafe { std::env::remove_var(var) };
 

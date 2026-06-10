@@ -141,9 +141,7 @@ where
         .await
         .map_err(|e| anyhow!("loading stored OAuth credentials: {e}"))?;
     if !loaded {
-        bail!(
-            "no stored OAuth credentials for {url}; run `toonfmt login --http {url}` first"
-        );
+        bail!("no stored OAuth credentials for {url}; run `toonfmt login --http {url}` first");
     }
 
     Ok(AuthClient::new(reqwest::Client::default(), manager))
@@ -186,9 +184,7 @@ where
     }
 
     // No token: run the authorization-code flow inline, persisting to `store`.
-    eprintln!(
-        "toonfmt: no stored OAuth credentials for {url}; launching browser to authorize…"
-    );
+    eprintln!("toonfmt: no stored OAuth credentials for {url}; launching browser to authorize…");
     login(url, &store, open_browser).await?;
 
     // The token is now persisted; build the serve client from it (store-backed, so
@@ -308,16 +304,14 @@ mod tests {
 
     #[test]
     fn parses_code_and_state() {
-        let (code, state) =
-            parse_callback_query("/callback?code=abc123&state=xyz789").unwrap();
+        let (code, state) = parse_callback_query("/callback?code=abc123&state=xyz789").unwrap();
         assert_eq!(code, "abc123");
         assert_eq!(state, "xyz789");
     }
 
     #[test]
     fn parses_url_encoded_values() {
-        let (code, state) =
-            parse_callback_query("/callback?code=a%2Fb%2Bc&state=s%20t").unwrap();
+        let (code, state) = parse_callback_query("/callback?code=a%2Fb%2Bc&state=s%20t").unwrap();
         assert_eq!(code, "a/b+c");
         assert_eq!(state, "s t");
     }
@@ -356,7 +350,9 @@ mod tests {
         // Client side: act as the browser hitting the redirect_uri.
         let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         client
-            .write_all(b"GET /callback?code=THECODE&state=THESTATE HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .write_all(
+                b"GET /callback?code=THECODE&state=THESTATE HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
             .await
             .unwrap();
         client.flush().await.unwrap();

@@ -54,11 +54,17 @@ where
                     .await
                     .context("writing transformed line")?;
                 if line.last() == Some(&b'\n') {
-                    writer.write_all(b"\n").await.context("writing line framing")?;
+                    writer
+                        .write_all(b"\n")
+                        .await
+                        .context("writing line framing")?;
                 }
             }
             None => {
-                writer.write_all(&line).await.context("writing line through")?;
+                writer
+                    .write_all(&line)
+                    .await
+                    .context("writing line through")?;
             }
         }
         writer.flush().await.context("flushing line")?;

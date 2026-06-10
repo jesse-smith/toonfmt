@@ -93,10 +93,7 @@ where
             .receive()
             .await
             .ok_or_else(|| anyhow!("HTTP upstream closed during initialize"))?;
-        let is_response = matches!(
-            msg,
-            JsonRpcMessage::Response(_) | JsonRpcMessage::Error(_)
-        );
+        let is_response = matches!(msg, JsonRpcMessage::Response(_) | JsonRpcMessage::Error(_));
         forward_to_client(&mut stdout, &tracker, stats.as_ref(), msg).await?;
         if is_response {
             break;
@@ -151,7 +148,9 @@ where
         let drain = async {
             while tracker.pending_count() > 0 {
                 match transport.receive().await {
-                    Some(msg) => forward_to_client(&mut stdout, &tracker, stats.as_ref(), msg).await?,
+                    Some(msg) => {
+                        forward_to_client(&mut stdout, &tracker, stats.as_ref(), msg).await?
+                    }
                     None => break, // upstream closed
                 }
             }
@@ -252,17 +251,16 @@ async fn forward_to_client(
                 .write_all(line.as_bytes())
                 .await
                 .context("writing to client stdout")?;
-            stdout.write_all(b"\n").await.context("writing line framing")?;
+            stdout
+                .write_all(b"\n")
+                .await
+                .context("writing line framing")?;
             stdout.flush().await.context("flushing client stdout")?;
         }
         JsonRpcMessage::Request(_) | JsonRpcMessage::Notification(_) => {
             let method = to_value(&msg)
                 .ok()
-                .and_then(|v| {
-                    v.get("method")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
+                .and_then(|v| v.get("method").and_then(Value::as_str).map(str::to_string))
                 .unwrap_or_else(|| "<unknown>".to_string());
             tracing::warn!(
                 %method,
