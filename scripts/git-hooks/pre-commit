@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#
+# Pre-commit guard: blocks committing likely secrets and credentials as
+# literals. Environment-variable references like ${SOME_TOKEN} are the correct
+# pattern and pass through untouched.
+#
+# Installed via:  git config core.hooksPath scripts/git-hooks
+# Bypass once (use sparingly):  git commit --no-verify
+#
+# Scans only the ADDED lines of staged changes, so pre-existing content does
+# not trip it and unrelated context lines are ignored. Uses POSIX ERE
+# (grep -iE) so it runs under both BSD (macOS) and GNU grep.
+
+set -euo pipefail
+
+quote=$'["\' :=]+'                                   # quote/separator run
+
+# Generic credential signatures.
+key_pat='-----BEGIN [A-Z ]*PRIVATE KEY-----'
+bearer_pat="(authorization|bearer)${quote}[A-Za-z0-9._-]{16,}"
+assign_pat="(secret|token|passwd|password|api[_-]?key)${quote}[A-Za-z0-9._-]{16,}"
+
+# Provider-specific signatures (well-known token/host shapes).
+aws_pat='AKIA[0-9A-Z]{16}'
+gcp_pat='AIza[0-9A-Za-z_-]{35}'
+azure_pat='[A-Za-z0-9+/]{75}AZD0[A-Za-z0-9+/]{4}'
+github_pat='gh[pousr]_[A-Za-z0-9]{36,}'
+databricks_token_pat='dapi[0-9a-fA-F]{32,}'
+databricks_host_azure_pat='adb-[0-9]+\.[0-9]+\.azuredatabricks\.net'
+databricks_host_aws_pat='[A-Za-z0-9-]+\.cloud\.databricks\.com'
+databricks_host_gcp_pat='[A-Za-z0-9-]+\.gcp\.databricks\.com'
+
+pattern="(${key_pat}|${bearer_pat}|${assign_pat}|${aws_pat}|${gcp_pat}|${azure_pat}|${github_pat}|${databricks_token_pat}|${databricks_host_azure_pat}|${databricks_host_aws_pat}|${databricks_host_gcp_pat})"
+
+# Added lines from the staged diff (drop the +++ header lines).
+added="$(git diff --cached -U0 --no-color | grep -E '^\+' | grep -Ev '^\+\+\+' || true)"
+
+# Flag matches (case-insensitive), but let env-var references (${...}) through.
+hits="$(printf '%s\n' "$added" \
+  | grep -niE "$pattern" \
+  | grep -Ev '\$\{[A-Za-z_][A-Za-z0-9_]*\}' \
+  || true)"
+
+if [ -n "$hits" ]; then
+  echo "✖ pre-commit: refusing to commit what looks like a literal secret or credential." >&2
+  echo "  Use an environment-variable reference instead, e.g. \${MY_TOKEN}." >&2
+  echo "" >&2
+  echo "  Offending staged additions:" >&2
+  printf '%s\n' "$hits" | sed 's/^/    /' >&2
+  echo "" >&2
+  echo "  If this is a false positive, bypass once with: git commit --no-verify" >&2
+  exit 1
+fi
+
+exit 0

@@ -4,18 +4,18 @@
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://adb-3403296355644133.13.azuredatabricks.net/api/2.0/mcp/sql",
+        "https://${DATABRICKS_HOST}/api/2.0/mcp/sql",
         "--header",
-        "Authorization: Bearer ${DATABRICKS_TOKEN}"
+        "Authorization: Bearer ${DATABRICKS_SQL_TOKEN}"
       ]
     },
     "databricks-toon": {
       "command": "/Users/jsmith79/Documents/Projects/SideProjects/toonfmt/target/release/toonfmt",
       "args": [
         "--http",
-        "https://adb-3403296355644133.13.azuredatabricks.net/api/2.0/mcp/sql",
+        "https://${DATABRICKS_HOST}/api/2.0/mcp/sql",
         "--bearer-env",
-        "DATABRICKS_TOKEN"
+        "DATABRICKS_SQL_TOKEN"
       ]
     },
     "parallel-search-toon": {

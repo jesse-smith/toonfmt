@@ -295,7 +295,7 @@ locally** unless the transport's async send/receive ordering forces correlation.
   Record all outcomes in this plan. (This is the verification step the user explicitly wants —
   it gates Slice A landing, alongside cairn-accept.)
 <!-- A6 RESULT — real-MCP verification (2026-06-02), against the LIVE Databricks SQL MCP
-  (https://adb-3403296355644133.13.azuredatabricks.net/api/2.0/mcp/sql, token auth via
+  (https://${DATABRICKS_HOST}/api/2.0/mcp/sql, token auth via
   --bearer-env DATABRICKS_TOKEN). Driven directly through the release binary's native
   --http path (the rmcp driver), not the stub. ALL PASS:
   - Handshake: initialize → real DatabricksMCPServer response forwarded; initialized
