@@ -1,0 +1,6 @@
+# Pin the formatter to the crate's edition so `rustfmt` invoked directly (not via
+# `cargo fmt`) applies the same style rules, and a future default-edition change
+# can't silently reflow the tree. Everything else is stock rustfmt defaults
+# (max_width = 100, the Rust community standard) — kept intentionally minimal so
+# the format matches what any contributor gets out of the box.
+edition = "2024"

@@ -1,0 +1,10 @@
+# Revisions listed here are skipped by `git blame` (and GitHub's blame view).
+# Use only for tree-wide mechanical changes — formatting, renames — that would
+# otherwise bury the real authorship of each line.
+#
+# Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub honors this file automatically.
+
+# style: apply rustfmt to src and tests (stock defaults; whitespace-only)
+936cd0d4e16ef5e5c957e0512ad96f1a726f4fba

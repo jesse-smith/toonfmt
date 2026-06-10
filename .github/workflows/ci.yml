@@ -21,7 +21,12 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: clippy, llvm-tools-preview
+          components: clippy, rustfmt, llvm-tools-preview
+
+      # Formatting is pinned by rustfmt.toml (edition only; stock defaults otherwise).
+      # This gate keeps the tree from silently drifting out of `cargo fmt` shape.
+      - name: Format
+        run: cargo fmt --check
 
       # `-D warnings` makes the crate-root `#![warn(clippy::cognitive_complexity)]`
       # (threshold 20, set in clippy.toml) a blocking gate alongside every other lint.
