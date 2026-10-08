@@ -4,29 +4,29 @@
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://${DATABRICKS_HOST}/api/2.0/mcp/sql",
+        "${DATABRICKS_HOST}/api/2.0/mcp/sql",
         "--header",
         "Authorization: Bearer ${DATABRICKS_SQL_TOKEN}"
       ]
     },
     "databricks-toon": {
-      "command": "/Users/jsmith79/Documents/Projects/SideProjects/toonfmt/target/release/toonfmt",
+      "command": "/Users/jsmith79/Documents/Projects/Tools/toonfmt/target/release/toonfmt",
       "args": [
         "--http",
-        "https://${DATABRICKS_HOST}/api/2.0/mcp/sql",
+        "${DATABRICKS_HOST}/api/2.0/mcp/sql",
         "--bearer-env",
         "DATABRICKS_SQL_TOKEN"
       ]
     },
     "parallel-search-toon": {
-      "command": "/Users/jsmith79/Documents/Projects/SideProjects/toonfmt/target/release/toonfmt",
+      "command": "/Users/jsmith79/Documents/Projects/Tools/toonfmt/target/release/toonfmt",
       "args": [
         "--http",
         "https://search.parallel.ai/mcp"
       ]
     },
     "cloudflare-oauth": {
-      "command": "/Users/jsmith79/Documents/Projects/SideProjects/toonfmt/target/release/toonfmt",
+      "command": "/Users/jsmith79/Documents/Projects/Tools/toonfmt/target/release/toonfmt",
       "args": [
         "--http",
         "https://bindings.mcp.cloudflare.com/mcp",
