@@ -6,7 +6,7 @@
         "mcp-remote",
         "${DATABRICKS_HOST}/api/2.0/mcp/sql",
         "--header",
-        "Authorization: Bearer ${DATABRICKS_SQL_TOKEN}"
+        "Authorization: Bearer ${DATABRICKS_TOKEN}"
       ]
     },
     "databricks-toon": {
@@ -15,7 +15,7 @@
         "--http",
         "${DATABRICKS_HOST}/api/2.0/mcp/sql",
         "--bearer-env",
-        "DATABRICKS_SQL_TOKEN"
+        "DATABRICKS_TOKEN"
       ]
     },
     "parallel-search-toon": {
