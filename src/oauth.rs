@@ -1,6 +1,6 @@
 //! OAuth 2.1 authorization-code flow driver for the explicit `toonfmt login`.
 //!
-//! **Division of labour (rmcp 1.7.0, pinned in the B3 spike):** rmcp's `auth`
+//! **Division of labour (rmcp 3.x; originally pinned on 1.7.0 in the B3 spike):** rmcp's `auth`
 //! feature owns the *protocol* — metadata discovery, dynamic client registration,
 //! PKCE, the code↔token exchange, and token refresh — exposed through the
 //! `OAuthState` state machine. This module owns the *lifecycle/UX* rmcp leaves to
@@ -22,7 +22,9 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use rmcp::transport::auth::OAuthState;
-use rmcp::transport::{AuthClient, AuthorizationManager, CredentialStore, StoredCredentials};
+use rmcp::transport::{
+    AuthClient, AuthorizationManager, AuthorizationRequest, CredentialStore, StoredCredentials,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -61,7 +63,11 @@ where
         .await
         .map_err(|e| anyhow!("initializing OAuth state for {url}: {e}"))?;
     oauth
-        .start_authorization(SCOPES, &redirect_uri, Some(CLIENT_NAME))
+        .start_authorization(
+            AuthorizationRequest::new(&redirect_uri)
+                .with_scopes(SCOPES.iter().copied())
+                .with_client_name(CLIENT_NAME),
+        )
         .await
         .map_err(|e| anyhow!("starting OAuth authorization (discovery/registration): {e}"))?;
     let auth_url = oauth

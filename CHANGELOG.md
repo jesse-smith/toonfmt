@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Upgraded `rmcp` from 1.7 to 3.5. Handshake order, `tools/call` passthrough, and the
+  OAuth flow are unchanged; clients still drive the `initialize` handshake.
+- Refreshed all other dependencies to their latest semver-compatible versions.
+
 ## [0.2.0] - 2026-06-10
 
 ### Added
